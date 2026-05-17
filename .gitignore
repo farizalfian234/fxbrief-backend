@@ -1,0 +1,35 @@
+# Build output
+target/
+*.class
+*.jar
+*.war
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.project
+.classpath
+.settings/
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / local env
+.env
+.env.local
+*.pem
+*.key
+
+# Architecture / planning docs that contain internal notes
+BUILD_ASSUMPTIONS.md
+DECISIONS.md
+BACKEND_ARCHITECTURE.md
+FRONTEND_ARCHITECTURE.md
