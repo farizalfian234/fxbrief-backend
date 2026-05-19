@@ -9,6 +9,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.converter.HttpMessageNotReadableException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -55,6 +57,24 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ApiResponse<Void>> handleNoHandler(NoHandlerFoundException ex) {
         ApiError error = ApiError.of(ErrorCodes.NOT_FOUND, "Resource not found");
         return ResponseEntity.status(HttpStatus.NOT_FOUND).body(ApiResponse.error(error));
+    }
+
+    @ExceptionHandler(DomainException.class)
+    public ResponseEntity<ApiResponse<Void>> handleDomain(DomainException ex) {
+        ApiError error = ApiError.of(ex.getCode(), ex.getMessage());
+        return ResponseEntity.status(ex.getStatus()).body(ApiResponse.error(error));
+    }
+
+    @ExceptionHandler(AuthenticationException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAuthentication(AuthenticationException ex) {
+        ApiError error = ApiError.of(ErrorCodes.UNAUTHENTICATED, "Authentication required");
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).body(ApiResponse.error(error));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    public ResponseEntity<ApiResponse<Void>> handleAccessDenied(AccessDeniedException ex) {
+        ApiError error = ApiError.of(ErrorCodes.FORBIDDEN, "Access denied");
+        return ResponseEntity.status(HttpStatus.FORBIDDEN).body(ApiResponse.error(error));
     }
 
     @ExceptionHandler(Exception.class)
