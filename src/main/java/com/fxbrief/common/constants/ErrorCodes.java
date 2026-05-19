@@ -18,6 +18,7 @@ public final class ErrorCodes {
     public static final String TOKEN_EXPIRED = "TOKEN_EXPIRED";
     public static final String TOKEN_ALREADY_USED = "TOKEN_ALREADY_USED";
     public static final String PASSWORD_RESET_UNAVAILABLE = "PASSWORD_RESET_UNAVAILABLE";
+    public static final String INVALID_GOOGLE_TOKEN = "INVALID_GOOGLE_TOKEN";
     public static final String UNAUTHENTICATED = "UNAUTHENTICATED";
     public static final String FORBIDDEN = "FORBIDDEN";
 

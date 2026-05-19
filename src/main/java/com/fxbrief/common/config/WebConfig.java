@@ -29,6 +29,7 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addInterceptor(rateLimitInterceptor)
                 .addPathPatterns(
                         "/auth/login",
+                        "/auth/google",
                         "/auth/register",
                         "/auth/forgot-password");
     }

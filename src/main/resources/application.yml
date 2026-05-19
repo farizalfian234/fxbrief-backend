@@ -69,6 +69,9 @@ fxbrief:
     email-verification-ttl-hours: 24
     password-reset-ttl-minutes: 30
     bcrypt-strength: 12
+  oauth:
+    google:
+      client-ids: ${GOOGLE_OAUTH_CLIENT_ID}
   frontend:
     base-url: ${FRONTEND_BASE_URL}
   account:
@@ -79,6 +82,7 @@ fxbrief:
     window-seconds: 60
     endpoint-limits:
       "[/auth/login]": 5
+      "[/auth/google]": 5
       "[/auth/register]": 3
       "[/auth/forgot-password]": 3
 

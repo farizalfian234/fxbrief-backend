@@ -52,7 +52,7 @@ native actuator response shape.
 | `INVALID_TOKEN`               | 400  | Verification or reset token was not found. |
 | `TOKEN_EXPIRED`               | 400  | Verification or reset token has expired. |
 | `TOKEN_ALREADY_USED`          | 400  | Verification or reset token has already been consumed. |
-| `PASSWORD_RESET_UNAVAILABLE`  | 400  | Account has no password (e.g. Google-only). |
+| `INVALID_GOOGLE_TOKEN`        | 400  | Google ID token failed verification (signature, expiry, audience, issuer, or `email_verified=false`). |
 | `UNAUTHENTICATED`             | 401  | Authentication is required and was missing or invalid. |
 | `INVALID_CREDENTIALS`         | 401  | Email and password combination did not match. |
 | `ACCOUNT_NOT_VERIFIED`        | 403  | Account exists but email has not yet been verified. |
@@ -74,19 +74,21 @@ Authenticated endpoints require a JWT in the `Authorization` header:
 Authorization: Bearer <jwt>
 ```
 
-Tokens are HS256-signed, issued on successful login, and valid for 24 hours. There is no
-refresh-token flow in v1; clients re-authenticate when the token expires.
+Tokens are HS256-signed, issued on successful login (email or Google), and valid for 24
+hours. There is no refresh-token flow in v1; clients re-authenticate when the token
+expires.
 
 ### Rate limiting
 
 A subset of unauthenticated auth endpoints is rate-limited per client IP using a fixed
 60-second window:
 
-| Endpoint                  | Limit per IP per minute |
-|---------------------------|-------------------------|
-| `POST /auth/login`        | 5                       |
-| `POST /auth/register`     | 3                       |
-| `POST /auth/forgot-password` | 3                    |
+| Endpoint                      | Limit per IP per minute |
+|-------------------------------|-------------------------|
+| `POST /auth/login`            | 5                       |
+| `POST /auth/google`           | 5                       |
+| `POST /auth/register`         | 3                       |
+| `POST /auth/forgot-password`  | 3                       |
 
 Exceeding the limit returns a `429 Too Many Requests` response with
 `error.code = RATE_LIMIT_EXCEEDED` and a `Retry-After` header indicating the number of
@@ -168,7 +170,9 @@ Registers a new user account.
 - If the email's domain is in the bundled disposable-email blocklist,
   `EMAIL_DOMAIN_NOT_ALLOWED` is returned.
 - If an account with the same email already exists, `EMAIL_ALREADY_REGISTERED` is
-  returned.
+  returned. This is returned uniformly regardless of how the existing account was
+  created — the response does not disclose whether the email is associated with a
+  password account or a Google account.
 - The account is created with `is_active = false` and assigned the `USER` role.
 - An email verification token is generated, persisted, and the resulting verification link is
   written to the application log at `INFO` level. Email delivery via SendGrid is introduced
@@ -239,7 +243,7 @@ Consumes an email verification token and activates the associated user account.
 
 ### `POST /auth/login`
 
-Authenticates a user and issues a JWT.
+Authenticates a user with email and password and issues a JWT.
 
 **Authentication:** none
 
@@ -258,8 +262,9 @@ Authenticates a user and issues a JWT.
 
 **Behaviour:**
 - The email is lowercased before lookup.
-- If no user exists or the password does not match,
-  `INVALID_CREDENTIALS` is returned.
+- If no user exists, the stored password hash is null (account created via Google only),
+  or the password does not match, `INVALID_CREDENTIALS` is returned. The response does
+  not disclose which of these conditions applied.
 - If the account exists but `is_active = false`:
   - If `deletion_requested_at` is null, `ACCOUNT_NOT_VERIFIED` is returned.
   - Otherwise `ACCOUNT_INACTIVE` is returned.
@@ -310,10 +315,73 @@ When `deletionPending` is `true`, `deletionDate` is also present:
 
 **Errors:**
 - `400 VALIDATION_FAILED` — request validation failed.
-- `401 INVALID_CREDENTIALS` — wrong email or password.
+- `401 INVALID_CREDENTIALS` — wrong email or password, or the account exists but has
+  no password (Google-only). The response is the same in every case.
 - `403 ACCOUNT_NOT_VERIFIED` — account exists but email is not yet verified.
 - `403 ACCOUNT_INACTIVE` — account inactive for another reason.
 - `429 RATE_LIMIT_EXCEEDED` — more than 5 login attempts from this IP in the last minute.
+
+### `POST /auth/google`
+
+Authenticates a user with a Google ID token and issues a JWT.
+
+The frontend obtains a Google ID token via Google Identity Services using the
+`GOOGLE_OAUTH_CLIENT_ID` Web client and posts it to this endpoint. The backend verifies
+the token's signature, expiry, issuer, and audience against Google's published keys, then
+applies the account linking and creation rules described below.
+
+**Authentication:** none
+
+**Request body:**
+
+```json
+{
+  "idToken": "eyJhbGciOiJSUzI1NiI..."
+}
+```
+
+**Validation:**
+- `idToken` — required, non-blank, max 4096 characters.
+
+**Behaviour:**
+
+The ID token is verified before any database lookup. Verification rejects tokens with a
+bad signature, an expired `exp`, an issuer other than `accounts.google.com` or
+`https://accounts.google.com`, an audience other than the configured
+`GOOGLE_OAUTH_CLIENT_ID`, or `email_verified = false`. Any verification failure returns
+`INVALID_GOOGLE_TOKEN`.
+
+The verified payload yields the Google subject (`sub`) and email. The handler then
+resolves the account using a fixed precedence:
+
+1. If an `oauth_accounts` row exists with `(provider = 'google', provider_user_id = sub)`,
+   the linked user is used directly. This is the returning Google user path.
+2. Otherwise, the user table is queried by email:
+   - If a user with this email exists, a Google link is inserted for that user. If the
+     user is inactive, `is_active` is set to `true` — Google has already verified the
+     email so the unverified-email gate no longer applies. A user with a pending
+     deletion remains pending; login still succeeds and surfaces `deletionPending`.
+   - If no user exists, a new user is created with `is_active = true`, `password_hash`
+     null, `role = USER`, and the Google link is inserted.
+
+On success, an HS256 JWT is issued identically to `POST /auth/login` (same claims, same
+24-hour TTL). The response shape is identical to the email login response.
+
+The local `users.email` column is set from the verified Google email on first creation
+or first link and is not subsequently updated if the Google email later changes.
+
+A new account starts with no subscription. Subscription provisioning will be wired in
+Phase 2A.
+
+**Success response (200):**
+
+Identical to `POST /auth/login`. The `deletionPending` and `deletionDate` fields follow
+the same rules.
+
+**Errors:**
+- `400 VALIDATION_FAILED` — request validation failed.
+- `400 INVALID_GOOGLE_TOKEN` — Google ID token failed verification.
+- `429 RATE_LIMIT_EXCEEDED` — more than 5 Google login attempts from this IP in the last minute.
 
 ### `POST /auth/forgot-password`
 
@@ -335,13 +403,13 @@ Initiates a password reset.
 **Behaviour:**
 - If no account exists for the email, the endpoint returns a generic success message
   without revealing whether the address is registered.
-- If the account exists but has no password (Google-only account),
-  `PASSWORD_RESET_UNAVAILABLE` is returned with the message: "This account uses
-  Google login. Password reset is not available."
-- Otherwise a 256-bit token is generated, its SHA-256 hash is persisted with a 30-minute
-  TTL, and the resulting reset link is written to the application log at `INFO` level. Email
-  delivery via SendGrid is introduced in Phase 5A. The raw token is never returned to the
-  client.
+- If the account exists — whether or not it currently has a password — a 256-bit token is
+  generated, its SHA-256 hash is persisted with a 30-minute TTL, and the resulting reset
+  link is written to the application log at `INFO` level. Email delivery via SendGrid is
+  introduced in Phase 5A. The raw token is never returned to the client.
+- A Google-only account (no `password_hash`) is treated identically to any other account.
+  Completing the reset sets a password and the account becomes dual-auth: subsequent
+  email logins and Google logins both succeed.
 
 **Success response (200):**
 
@@ -357,7 +425,6 @@ Initiates a password reset.
 
 **Errors:**
 - `400 VALIDATION_FAILED` — request validation failed.
-- `400 PASSWORD_RESET_UNAVAILABLE` — account has no password.
 - `429 RATE_LIMIT_EXCEEDED` — more than 3 forgot-password attempts from this IP in the last minute.
 
 ### `POST /auth/reset-password`
@@ -385,7 +452,8 @@ Completes a password reset using a token issued by `/auth/forgot-password`.
 - If the token has already been used, `TOKEN_ALREADY_USED` is returned.
 - If the token is past its 30-minute TTL, `TOKEN_EXPIRED` is returned.
 - On success, the user's `password_hash` is rotated to BCrypt of the new password and
-  the token's `used_at` is stamped with the current time.
+  the token's `used_at` is stamped with the current time. If the user previously had no
+  password (Google-only account), the account is now dual-auth.
 
 **Success response (200):**
 
@@ -424,9 +492,9 @@ permanently removed by the daily hard-delete scheduler.
   period (login surfaces `deletionPending: true` and `deletionDate` so the frontend can
   render the Deletion Pending Modal). Cancellation is performed via
   `POST /auth/cancel-deletion`.
-- Once the grace period has elapsed, the user, the user's verification tokens, and the
-  user's password-reset tokens are deleted from the database by the daily scheduler
-  (`ON DELETE CASCADE`).
+- Once the grace period has elapsed, the user, the user's verification tokens, the user's
+  password-reset tokens, and the user's `oauth_accounts` rows are deleted from the
+  database by the daily scheduler (`ON DELETE CASCADE`).
 
 **Success response (200):**
 

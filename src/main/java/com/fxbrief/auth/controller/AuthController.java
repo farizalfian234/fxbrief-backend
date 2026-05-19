@@ -2,6 +2,7 @@ package com.fxbrief.auth.controller;
 
 import com.fxbrief.auth.dto.CancelDeletionResponse;
 import com.fxbrief.auth.dto.ForgotPasswordRequest;
+import com.fxbrief.auth.dto.GoogleLoginRequest;
 import com.fxbrief.auth.dto.LoginRequest;
 import com.fxbrief.auth.dto.LoginResponse;
 import com.fxbrief.auth.dto.MessageResponse;
@@ -13,6 +14,7 @@ import com.fxbrief.auth.dto.VerifyEmailRequest;
 import com.fxbrief.auth.security.AuthenticatedUser;
 import com.fxbrief.auth.service.AccountDeletionService;
 import com.fxbrief.auth.service.EmailVerificationService;
+import com.fxbrief.auth.service.GoogleAuthService;
 import com.fxbrief.auth.service.LoginService;
 import com.fxbrief.auth.service.PasswordResetService;
 import com.fxbrief.auth.service.RegistrationService;
@@ -35,6 +37,7 @@ public class AuthController {
     private final RegistrationService registrationService;
     private final EmailVerificationService emailVerificationService;
     private final LoginService loginService;
+    private final GoogleAuthService googleAuthService;
     private final PasswordResetService passwordResetService;
     private final AccountDeletionService accountDeletionService;
 
@@ -52,6 +55,11 @@ public class AuthController {
     @PostMapping("/login")
     public ResponseEntity<ApiResponse<LoginResponse>> login(@Valid @RequestBody LoginRequest request) {
         return ResponseEntity.ok(ApiResponse.success(loginService.login(request)));
+    }
+
+    @PostMapping("/google")
+    public ResponseEntity<ApiResponse<LoginResponse>> google(@Valid @RequestBody GoogleLoginRequest request) {
+        return ResponseEntity.ok(ApiResponse.success(googleAuthService.login(request)));
     }
 
     @PostMapping("/forgot-password")

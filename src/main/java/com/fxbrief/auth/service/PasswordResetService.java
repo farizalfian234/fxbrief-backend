@@ -48,13 +48,6 @@ public class PasswordResetService {
 
         User user = userOpt.get();
 
-        if (!user.hasPassword()) {
-            throw new DomainException(
-                    ErrorCodes.PASSWORD_RESET_UNAVAILABLE,
-                    HttpStatus.BAD_REQUEST,
-                    "This account uses Google login. Password reset is not available.");
-        }
-
         String rawToken = tokenGenerator.generatePasswordResetToken();
         String tokenHash = tokenGenerator.hashToken(rawToken);
 
