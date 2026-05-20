@@ -9,6 +9,7 @@ import com.fxbrief.auth.security.FrontendProperties;
 import com.fxbrief.auth.validator.DisposableEmailDomainRegistry;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.subscription.service.SubscriptionService;
 import com.fxbrief.user.entity.Role;
 import com.fxbrief.user.entity.SystemRole;
 import com.fxbrief.user.entity.User;
@@ -37,6 +38,7 @@ public class RegistrationService {
     private final DisposableEmailDomainRegistry disposableEmailRegistry;
     private final AuthProperties authProperties;
     private final FrontendProperties frontendProperties;
+    private final SubscriptionService subscriptionService;
 
     @Transactional
     public RegisterResponse register(RegisterRequest request) {
@@ -66,6 +68,8 @@ public class RegistrationService {
         user.setActive(false);
         user.setHasEverPaid(false);
         userRepository.save(user);
+
+        subscriptionService.provisionFreePlan(user);
 
         EmailVerificationToken token = new EmailVerificationToken();
         token.setUser(user);

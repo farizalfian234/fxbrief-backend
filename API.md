@@ -61,6 +61,7 @@ native actuator response shape.
 | `NOT_FOUND`                   | 404  | Resource or route does not exist. |
 | `METHOD_NOT_ALLOWED`          | 405  | HTTP method not allowed for this route. |
 | `EMAIL_ALREADY_REGISTERED`    | 409  | An account with this email already exists. |
+| `INVALID_PLAN_FOR_TOP_UP`     | 400  | Top-up target plan is neither `BASIC` nor `PREMIUM`. |
 | `RATE_LIMIT_EXCEEDED`         | 429  | Too many requests from this IP within the rate-limit window. A `Retry-After` header indicates the number of seconds to wait. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
@@ -548,3 +549,180 @@ Cancels a pending account deletion.
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
 - `404 NOT_FOUND` — the authenticated user could not be located (e.g. already
   hard-deleted by the daily scheduler).
+
+### `GET /subscription`
+
+Returns the authenticated user's current subscription, the active plan, the effective plan
+after applying the lapse rule, and the current forex-market open/closed status. Intended
+as the primary dashboard payload.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+- Looks up the single `subscriptions` row keyed by the authenticated user id and projects it
+  alongside the joined `subscription_plans` row.
+- `plan` is the base plan persisted on the subscription row — the plan the user most
+  recently paid for, or `FREE` for a never-paid user.
+- `effectivePlan` is the plan the frontend should render as the user's current label and
+  use to gate history access and report generation. It downgrades from the base plan to
+  `FREE` when all of the following hold:
+  1. The base plan is `BASIC` or `PREMIUM`.
+  2. `remainingReports` is zero.
+  3. No `subscription_usage` row exists for this user on the current forex market date
+     (PRD §5.4: "0 remaining reports, next forex market day — plan label changes to Free,
+     history locks, generation disabled"). Within the same forex market day the user
+     generated their last report, `effectivePlan` continues to match the base plan.
+  A top-up (Phase 5B) restores `remainingReports > 0` and `effectivePlan` reverts to the
+  paid plan immediately.
+- `hasEverPaid` is read from the `users` row. Phase 5B will be responsible for flipping it
+  on first successful payment; in Phase 2A and Phase 2B the value is always `false` for
+  any newly registered user.
+- `marketOpen` is computed server-side from the JVM's UTC clock. It is `false` between
+  Friday 22:00 UTC and Sunday 22:00 UTC (the forex weekend window) and `true` at all
+  other times. The boolean is recomputed on every request — there is no caching.
+- This endpoint does not consume or modify the report count.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "plan": {
+      "id": 2,
+      "name": "BASIC",
+      "price": 10.00,
+      "reportQuota": 20
+    },
+    "effectivePlan": {
+      "id": 1,
+      "name": "FREE",
+      "price": 0.00,
+      "reportQuota": 3
+    },
+    "remainingReports": 0,
+    "hasEverPaid": true,
+    "marketOpen": true
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+The example above shows a lapsed Basic user (paid Basic, ran out, new forex day has
+started). For a non-lapsed user `plan` and `effectivePlan` reference the same plan row.
+
+Plan `name` is one of `FREE`, `BASIC`, `PREMIUM`. `price` is a decimal in USD.
+`reportQuota` is the report count granted by a fresh top-up of the plan (3 for Free, 20
+for Basic and Premium).
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user. In Phase 2A every
+  registered user is provisioned with a Free subscription at registration time, so this
+  should not occur for a normally-created account; it is documented for defence in depth.
+
+### `GET /subscription/remaining`
+
+Returns the authenticated user's remaining report count. Intended as a lightweight poll
+endpoint when only the counter is needed (e.g. after a report is generated in a later
+phase).
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "remainingReports": 3
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user (see notes on
+  `GET /subscription`).
+
+### `POST /subscription/top-up`
+
+Initiates a top-up for the authenticated user. Returns the carry-over preview the
+frontend uses to render the warning modal before redirecting to Midtrans.
+
+**This endpoint does not perform a payment.** The actual plan change, report-count
+mutation, and audit row are written by the Phase 5B Midtrans confirmation handler. The
+Phase 2B endpoint is a read-only preparation step that surfaces the carry-over
+calculation and warning flag to the frontend so the right UX can be shown before
+payment.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:**
+
+```json
+{
+  "plan": "BASIC"
+}
+```
+
+**Validation:**
+- `plan` — required, non-blank, max 16 characters. Must be `BASIC` or `PREMIUM`
+  (case-insensitive). `FREE` is not a valid top-up target.
+
+**Behaviour:**
+- The target plan code is validated. `BASIC` and `PREMIUM` are the only accepted values;
+  anything else (including `FREE`) returns `INVALID_PLAN_FOR_TOP_UP`.
+- The authenticated user's current `subscriptions` row is read. `remainingReports` is
+  preserved in the response as the carry-over base; per PRD §5.7, remaining reports
+  always carry over and are never lost on a plan switch.
+- `carryOverCalculation` is computed as `{ remainingReports, additionalReports, newTotal }`
+  where `additionalReports` is the target plan's `report_count` (20 for both Basic and
+  Premium) and `newTotal = remainingReports + additionalReports`.
+- `warningFlag` is `true` when `remainingReports > 0`. The frontend uses this to decide
+  whether to show the carry-over warning modal before redirecting to payment (PRD §5.7).
+  A Free user and a lapsed user with 0 remaining both receive `warningFlag = false` and
+  no warning modal is shown.
+- `paymentUrl` is `null` in this phase. Midtrans charge creation lands in Phase 5B and
+  will populate this field with the hosted payment-page URL. The field is in the
+  response shape now so the frontend integration contract is stable across the Phase 2B /
+  Phase 5B transition.
+- No subscription state is mutated. No `subscription_audit_logs` row is written — the
+  audit row corresponding to a top-up is emitted by Phase 5B when payment is confirmed
+  and the plan/remaining count actually change.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "targetPlan": {
+      "id": 3,
+      "name": "PREMIUM",
+      "price": 20.00,
+      "reportQuota": 20
+    },
+    "paymentUrl": null,
+    "warningFlag": true,
+    "carryOverCalculation": {
+      "remainingReports": 7,
+      "additionalReports": 20,
+      "newTotal": 27
+    }
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `400 VALIDATION_FAILED` — request validation failed (e.g. missing `plan`).
+- `400 INVALID_PLAN_FOR_TOP_UP` — `plan` is not `BASIC` or `PREMIUM`.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user (see notes on
+  `GET /subscription`).

@@ -22,5 +22,7 @@ public final class ErrorCodes {
     public static final String UNAUTHENTICATED = "UNAUTHENTICATED";
     public static final String FORBIDDEN = "FORBIDDEN";
 
+    public static final String INVALID_PLAN_FOR_TOP_UP = "INVALID_PLAN_FOR_TOP_UP";
+
     private ErrorCodes() {}
 }
