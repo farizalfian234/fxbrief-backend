@@ -78,6 +78,10 @@ fxbrief:
     deletion-grace-days: 30
   scheduler:
     hard-delete-cron: "0 15 22 * * *"
+    market-data-fetch-interval-ms: 3600000          # 60 minutes
+    market-data-fetch-initial-delay-ms: 0           # fetch immediately on startup if market open
+    market-data-batch-pacing-seconds: 65            # spacing between OHLCV batches; 60s reset + 5s safety
+    calendar-fetch-cron: "0 30 22 * * *"            # daily 22:30 UTC — just after the forex day rolls
   rate-limit:
     window-seconds: 60
     endpoint-limits:
@@ -85,6 +89,107 @@ fxbrief:
       "[/auth/google]": 5
       "[/auth/register]": 3
       "[/auth/forgot-password]": 3
+  twelve-data:
+    api-key: ${TWELVE_DATA_API_KEY}
+    base-url: https://api.twelvedata.com
+    output-size: 200
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
+  forex-factory:
+    base-url: https://nfs.faireconomy.media
+    user-agent: "FXBrief/1.0 (+https://fxbrief.example)"
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
+    startup-refresh-threshold-hours: 12
+  claude:
+    api-key: ${CLAUDE_API_KEY}
+    base-url: https://api.anthropic.com
+    model: ${CLAUDE_API_MODEL:claude-sonnet-4-6}
+    api-version: "2023-06-01"
+    max-tokens: 2048
+    connect-timeout-ms: 10000
+    read-timeout-ms: 60000
+  analysis:
+    significant-swing:
+      atr-period: 14
+      min-displacement-atr-multiple: 1.5
+      lookback-bars: 3
+    zone-freshness:
+      never-retested-score: 3
+      wick-touch-score: 1
+      one-body-close-inside-score: -2
+      multiple-candles-inside-score: -4
+      invalidation-threshold: -10
+    zone-penetration:
+      shallow-max-ratio: 0.20
+      deep-min-ratio: 0.80
+    fibonacci:
+      strong-trend-levels: [0.5, 0.618]
+      deep-pullback-levels: [0.705, 0.786]
+      level-match-tolerance-ratio: 0.05
+    m15-confirmation:
+      engulfing-min-body-ratio: 0.6
+      displacement-min-atr-multiple: 1.0
+      sweep-lookback-bars: 12
+    confidence-weights:
+      htf-structure-aligned: 3
+      fresh-zone: 3
+      m15-bos: 3
+      liquidity-sweep: 3
+      fibonacci-confluence: 2
+      candlestick-pattern: 1
+      fundamental-conflict: -3
+      deeply-penetrated-zone: -2
+      low-max-score: 5
+      medium-max-score: 10
+    signal-lifecycle:
+      awaiting-confirmation-expiry-days: 3
+    fundamental:
+      high-impact-level: HIGH
+    shadow-narrative-logging:
+      enabled: false   # toggle on for 2-4 weeks post-launch to measure mega-call vs per-pair divergence
+
+resilience4j:
+  retry:
+    instances:
+      twelveData:
+        max-attempts: 3
+        wait-duration: 2s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
+      forexFactory:
+        max-attempts: 2
+        wait-duration: 5s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
+      claude:
+        max-attempts: 3
+        wait-duration: 2s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
+  circuitbreaker:
+    instances:
+      twelveData:
+        sliding-window-size: 10
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: false
+      forexFactory:
+        sliding-window-size: 6
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 300s
+        permitted-number-of-calls-in-half-open-state: 2
+        register-health-indicator: false
+      claude:
+        sliding-window-size: 10
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: false
 
 logging:
   level:

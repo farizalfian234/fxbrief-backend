@@ -24,5 +24,9 @@ public final class ErrorCodes {
 
     public static final String INVALID_PLAN_FOR_TOP_UP = "INVALID_PLAN_FOR_TOP_UP";
 
+    public static final String MARKET_DATA_UNAVAILABLE = "MARKET_DATA_UNAVAILABLE";
+    public static final String NARRATIVE_UNAVAILABLE = "NARRATIVE_UNAVAILABLE";
+    public static final String MARKET_DATA_NOT_READY = "MARKET_DATA_NOT_READY";
+
     private ErrorCodes() {}
 }

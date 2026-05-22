@@ -63,6 +63,9 @@ native actuator response shape.
 | `EMAIL_ALREADY_REGISTERED`    | 409  | An account with this email already exists. |
 | `INVALID_PLAN_FOR_TOP_UP`     | 400  | Top-up target plan is neither `BASIC` nor `PREMIUM`. |
 | `RATE_LIMIT_EXCEEDED`         | 429  | Too many requests from this IP within the rate-limit window. A `Retry-After` header indicates the number of seconds to wait. |
+| `MARKET_DATA_UNAVAILABLE`     | 503  | Upstream OHLCV or economic-calendar provider call failed after retries; circuit breaker may be open. Introduced in Phase 3A; surfaced to clients via the report-generation endpoint in Phase 3B. |
+| `NARRATIVE_UNAVAILABLE`       | 503  | Claude API call failed after retries; circuit breaker may be open. Introduced in Phase 3A; surfaced via Phase 3B. |
+| `MARKET_DATA_NOT_READY`       | 503  | Pre-fetch has not yet produced a fully-complete cycle (cold start, or no `fetch_id` has full row coverage). Introduced in Phase 3A; surfaced via Phase 3B. Per PRD §10.2 the client retries without consuming a report credit. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
