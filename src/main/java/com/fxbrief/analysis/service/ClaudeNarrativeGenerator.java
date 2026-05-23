@@ -1,5 +1,7 @@
 package com.fxbrief.analysis.service;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.analysis.client.ClaudeClient;
 import com.fxbrief.analysis.dto.ConfidenceScoreView;
 import com.fxbrief.analysis.dto.EconomicEvent;
@@ -7,6 +9,7 @@ import com.fxbrief.analysis.dto.FundamentalAssessment;
 import com.fxbrief.analysis.dto.M15ConfirmationView;
 import com.fxbrief.analysis.dto.MarketStructureView;
 import com.fxbrief.analysis.dto.PairAnalysis;
+import com.fxbrief.analysis.dto.PairNarrativeFields;
 import com.fxbrief.analysis.dto.TradePlan;
 import com.fxbrief.analysis.dto.Zone;
 import com.fxbrief.common.exception.DomainException;
@@ -18,7 +21,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * Single-pair Claude narrative generator. Used in two situations:
+ * Single-pair Claude narrative generator. Returns the same five named text
+ * fields as the mega-call (PRD §8.4). Used in two situations:
  *
  * <ol>
  *   <li>Per-pair fallback when the mega-call's validator flags one or more
@@ -28,53 +32,103 @@ import java.util.Locale;
  * </ol>
  *
  * Per DECISIONS D-042, narratives are plan-agnostic at generation time:
- * every pair receives the full Premium-depth narrative regardless of which
+ * every pair receives the full Premium-depth content regardless of which
  * subscription tier triggered the report.
  *
  * The system prompt forbids Claude from estimating any numeric value. All
  * prices, levels and scores are pre-computed and embedded in the user prompt
  * as plain text (PRD §11.3 step 7, §15 hallucination mitigation).
+ *
+ * Like the mega-call (D-052), this generator no longer uses assistant-
+ * message prefilling. The prompt instructs Claude to emit a pure JSON
+ * object; a defensive code-fence stripper runs before parsing.
+ *
+ * This generator does <b>not</b> produce the report-level summary — that
+ * field belongs to the mega-call only. When the mega-call is unavailable
+ * for the whole report, the summary falls back to the Java composer
+ * (DECISIONS D-051).
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ClaudeNarrativeGenerator {
 
-    static final String NARRATIVE_FALLBACK =
-            "Narrative unavailable — see structured analysis below.";
+    public static final double PER_PAIR_TEMPERATURE = 0.2;
 
     static final String SYSTEM_PROMPT = """
-            You are FXBrief, a forex analysis writer. Generate an in-depth, plain-English Smart \
-            Money Concept narrative from the structured analysis provided. Do not invent, \
-            estimate, or recompute any numeric value, price level, percentage, ratio or score — \
-            use only the numbers supplied in the user prompt verbatim. If a value is not supplied, \
-            do not introduce one. Begin the narrative with the pair symbol exactly as given. \
-            Cover, in order: multi-timeframe structure (W, D, H4, M15), the active supply/demand \
-            zone with its freshness state, penetration and Fibonacci confluence, the M15 \
-            confirmation status with whichever sub-signals fired, the weighted confidence score \
-            with contributing factors, the signal lifecycle state, and the fundamental layer with \
-            high-impact events. Keep paragraphs short; do not use markdown headings or bullet \
-            lists. Do not include disclaimers or boilerplate.
+            You are FXBrief, a forex analysis writer. You will be given pre-computed structured \
+            analysis for a single currency pair. Produce a JSON object with exactly these six \
+            fields, no more, no less:
+              - pair: the pair symbol exactly as given
+              - setupStatus: ONE line. Human-readable signal state.
+              - shortReasoning: ONE OR TWO sentences. Plain-English explanation of why this \
+            setup is or is not actionable.
+              - executiveReasoning: THREE TO FIVE sentences. Readable narrative covering the \
+            "so what". No markdown, no bullet lists, no headings.
+              - invalidationNote: ONE sentence. State the specific price-based invalidation \
+            condition using only price levels supplied in the structured input.
+              - fundamentalSummary: TWO OR THREE sentences. How any supplied high-impact \
+            economic events affect this specific pair's setup.
+
+            Do not invent, estimate, or recompute any numeric value, price level, percentage, \
+            ratio, or score. Use only the numbers supplied in the structured input verbatim.
+
+            OUTPUT FORMAT — CRITICAL:
+            Your entire response must be a single valid JSON object. The very first character of \
+            your response must be the opening brace {. The very last character must be the \
+            closing brace }. Do not wrap the JSON in markdown code fences. Do not include any \
+            prose, preamble, commentary, or trailing text. Just the JSON object, nothing else.
             """;
 
-    private final ClaudeClient claudeClient;
+    private static final List<String> TIMEFRAMES = List.of("W", "D", "H4", "M15");
 
-    public String generate(PairAnalysis analysis) {
+    private final ClaudeClient claudeClient;
+    private final ObjectMapper objectMapper;
+
+    public PairNarrativeFields generate(PairAnalysis analysis) {
         if (analysis == null) {
-            return NARRATIVE_FALLBACK;
+            return PairNarrativeFields.fallback();
         }
         try {
             String userPrompt = buildPrompt(analysis);
-            return claudeClient.generateNarrative(SYSTEM_PROMPT, userPrompt);
+            // No assistant prefill — see DECISIONS D-052.
+            String response = claudeClient.generateNarrative(
+                    SYSTEM_PROMPT, userPrompt, null, PER_PAIR_TEMPERATURE);
+            return parse(response, analysis.pair());
         } catch (DomainException e) {
-            log.warn("Claude narrative generation failed for {}: code={} message={}",
+            log.warn("Per-pair Claude call failed for {}: code={} message={}",
                     analysis.pair(), e.getCode(), e.getMessage());
-            return NARRATIVE_FALLBACK;
+            return PairNarrativeFields.fallback();
         } catch (Exception e) {
-            log.warn("Claude narrative generation threw unexpectedly for {}: {}",
+            log.warn("Per-pair Claude call threw unexpectedly for {}: {}",
                     analysis.pair(), e.getMessage());
-            return NARRATIVE_FALLBACK;
+            return PairNarrativeFields.fallback();
         }
+    }
+
+    private PairNarrativeFields parse(String response, String pair) {
+        try {
+            String cleaned = MegaCallNarrativeService.stripCodeFences(response);
+            JsonNode root = objectMapper.readTree(cleaned);
+            return new PairNarrativeFields(
+                    textOrFallback(root, "setupStatus"),
+                    textOrFallback(root, "shortReasoning"),
+                    textOrFallback(root, "executiveReasoning"),
+                    textOrFallback(root, "invalidationNote"),
+                    textOrFallback(root, "fundamentalSummary")
+            );
+        } catch (Exception e) {
+            log.warn("Per-pair response unparseable for {}: {}", pair, e.getMessage());
+            return PairNarrativeFields.fallback();
+        }
+    }
+
+    private String textOrFallback(JsonNode root, String field) {
+        JsonNode node = root.path(field);
+        if (node.isTextual() && !node.asText().isBlank()) {
+            return node.asText();
+        }
+        return "Analysis unavailable — see structured data below.";
     }
 
     String buildPrompt(PairAnalysis a) {
@@ -84,8 +138,9 @@ public class ClaudeNarrativeGenerator {
         sb.append("Layer: ").append(a.layer()).append('\n').append('\n');
 
         sb.append("=== Multi-timeframe structure ===\n");
-        for (String tf : List.of("W", "D", "H4", "M15")) {
-            MarketStructureView s = a.structureByTimeframe().get(tf);
+        for (String tf : TIMEFRAMES) {
+            MarketStructureView s = a.structureByTimeframe() == null
+                    ? null : a.structureByTimeframe().get(tf);
             if (s != null) {
                 sb.append(tf).append(": bias=").append(s.bias())
                         .append(" lastEvent=").append(s.lastEvent()).append('\n');
@@ -185,6 +240,9 @@ public class ClaudeNarrativeGenerator {
         if (a.fundamentalConflict()) {
             sb.append("Note: high-impact economic events this week affect this pair.\n");
         }
+
+        sb.append("\nNow produce the JSON object as specified. Start with { and end with }. ");
+        sb.append("No code fences, no preamble, no trailing text.");
         return sb.toString();
     }
 

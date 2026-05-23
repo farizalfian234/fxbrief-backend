@@ -29,7 +29,10 @@ import java.util.Map;
  * and detect HTF + fundamental conflicts.
  *
  * Pure computation — no I/O, no narrative generation. The result is the
- * structured input fed to Claude downstream.
+ * structured input fed to Claude downstream. The five Claude-generated text
+ * fields on {@link PairAnalysis} (setupStatus, shortReasoning,
+ * executiveReasoning, invalidationNote, fundamentalSummary) are left null
+ * here and populated later by {@code AnalysisEngine.withClaudeFields()}.
  */
 @Service
 @RequiredArgsConstructor
@@ -104,7 +107,11 @@ public class PairAnalysisEngine {
                 pickPrimaryFundamental(baseFundamental, quoteFundamental),
                 htfConflict,
                 fundamentalConflict,
-                null,
+                null,   // setupStatus — populated by AnalysisEngine.withClaudeFields
+                null,   // shortReasoning — populated by AnalysisEngine.withClaudeFields
+                null,   // executiveReasoning — populated by AnalysisEngine.withClaudeFields
+                null,   // invalidationNote — populated by AnalysisEngine.withClaudeFields
+                null,   // fundamentalSummary — populated by AnalysisEngine.withClaudeFields
                 layer);
     }
 

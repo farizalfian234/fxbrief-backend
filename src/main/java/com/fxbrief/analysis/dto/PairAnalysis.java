@@ -6,6 +6,12 @@ import java.util.Map;
  * Pre-computed structured analysis result for a single pair across all four
  * timeframes. Every numeric value comes from real candle data — none of it is
  * estimated by Claude (PRD §15, AI hallucination mitigation).
+ *
+ * <p>The five Claude-generated text fields ({@code setupStatus},
+ * {@code shortReasoning}, {@code executiveReasoning}, {@code invalidationNote},
+ * {@code fundamentalSummary}) are populated after the mega-call returns. They
+ * are {@code null} on the value returned by {@code PairAnalysisEngine.analyze}
+ * and filled in by {@code AnalysisEngine.withClaudeFields}.
  */
 public record PairAnalysis(
         String pair,
@@ -18,7 +24,11 @@ public record PairAnalysis(
         FundamentalAssessment fundamental,
         boolean htfConflict,
         boolean fundamentalConflict,
-        String narrative,
+        String setupStatus,
+        String shortReasoning,
+        String executiveReasoning,
+        String invalidationNote,
+        String fundamentalSummary,
         String layer
 ) {
 

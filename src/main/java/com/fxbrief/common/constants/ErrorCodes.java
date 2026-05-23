@@ -28,5 +28,9 @@ public final class ErrorCodes {
     public static final String NARRATIVE_UNAVAILABLE = "NARRATIVE_UNAVAILABLE";
     public static final String MARKET_DATA_NOT_READY = "MARKET_DATA_NOT_READY";
 
+    public static final String MARKET_CLOSED = "MARKET_CLOSED";
+    public static final String DAILY_LIMIT_REACHED = "DAILY_LIMIT_REACHED";
+    public static final String NO_REMAINING_REPORTS = "NO_REMAINING_REPORTS";
+
     private ErrorCodes() {}
 }

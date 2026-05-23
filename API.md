@@ -66,6 +66,9 @@ native actuator response shape.
 | `MARKET_DATA_UNAVAILABLE`     | 503  | Upstream OHLCV or economic-calendar provider call failed after retries; circuit breaker may be open. Introduced in Phase 3A; surfaced to clients via the report-generation endpoint in Phase 3B. |
 | `NARRATIVE_UNAVAILABLE`       | 503  | Claude API call failed after retries; circuit breaker may be open. Introduced in Phase 3A; surfaced via Phase 3B. |
 | `MARKET_DATA_NOT_READY`       | 503  | Pre-fetch has not yet produced a fully-complete cycle (cold start, or no `fetch_id` has full row coverage). Introduced in Phase 3A; surfaced via Phase 3B. Per PRD §10.2 the client retries without consuming a report credit. |
+| `MARKET_CLOSED`               | 409  | Report generation attempted outside forex market hours (Friday 22:00 UTC → Sunday 22:00 UTC). Introduced in Phase 3B. |
+| `DAILY_LIMIT_REACHED`         | 409  | A `user_reports` row already exists for the authenticated user on the current forex market date. Introduced in Phase 3B. |
+| `NO_REMAINING_REPORTS`        | 409  | The authenticated user has zero remaining reports. Introduced in Phase 3B. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -729,3 +732,147 @@ payment.
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
 - `404 NOT_FOUND` — no subscription exists for the authenticated user (see notes on
   `GET /subscription`).
+
+### `POST /reports/generate`
+
+Generates the authenticated user's report for the current forex market day. The
+response carries the full Premium-depth analysis payload; the frontend filters by
+the caller's plan at render time.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+
+The request is processed in three phases.
+
+1. **Pre-check (read-only).** The subscription is loaded and verified. The endpoint
+   short-circuits with the corresponding error code on any of the following:
+   - the authenticated user account is not active → `403 ACCOUNT_INACTIVE`;
+   - the forex market is currently closed (Friday 22:00 UTC → Sunday 22:00 UTC) →
+     `409 MARKET_CLOSED`;
+   - a `user_reports` row already exists for the user on the current forex market
+     date → `409 DAILY_LIMIT_REACHED`;
+   - the subscription's `remaining_reports` is zero or negative →
+     `409 NO_REMAINING_REPORTS`.
+2. **Analysis.** The analysis engine resolves the current `fetch_id`. If a
+   `market_analysis` row already exists for that id, its stored payload is returned
+   without any Claude API call. Otherwise the full SMC pipeline runs, narratives
+   are generated via the mega-call (with per-pair fallback per DECISIONS D-045), a
+   short one-line summary is composed from the payload, and the row is persisted.
+   See PRD §11.3 and DECISIONS D-044 for the shared-analysis contract.
+3. **Commit (advisory-locked transaction).** A Postgres transaction-scoped advisory
+   lock keyed on `user_id` serialises concurrent double-taps from the same user.
+   The pre-check invariants are re-verified under the lock. If the payload's
+   `marketsConsolidating` flag is `false`, `remaining_reports` is decremented and a
+   `subscription_usage` row is inserted; if `true`, neither happens (zero-content
+   rule, PRD §5.5). A `user_reports` row is inserted referencing the `market_analysis`
+   row with `summary` copied verbatim and `plan_at_generation` set to the
+   subscription's current base plan id.
+
+The response includes a `reportsExhausted` flag that is `true` when this generation
+caused `remaining_reports` to reach zero. Phase 5A consumes this signal to send the
+report-exhausted email; Phase 3B does not send any email itself.
+
+The shared-analysis layer makes generation cheap for every user beyond the first in
+each fetch cycle: subsequent callers in the same cycle reuse the existing
+`market_analysis` row with no Claude call.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "reportId": 17,
+    "summary": "3 setups available — GBP/USD best opportunity",
+    "payload": {
+      "bestPair": "GBP/USD",
+      "pairs": [
+        { "pair": "GBP/USD", "signalState": "CONFIRMED",
+          "setupStatus": "Confirmed long near H4 demand — high conviction",
+          "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+          "executiveReasoning": "...",
+          "invalidationNote": "Bullish bias invalidates if H4 closes below 1.27500.",
+          "fundamentalSummary": "..." }
+      ],
+      "marketsConsolidating": false,
+      "generatedAt": "2026-05-17T08:00:00Z",
+      "marketDataFetchedAt": "2026-05-17T07:55:00Z",
+      "calendarFetchedAt": "2026-05-17T06:30:00Z"
+    },
+    "forexMarketDate": "2026-05-18",
+    "generatedAt": "2026-05-17T08:00:00Z",
+    "planAtGeneration": "PREMIUM",
+    "countedAgainstLimit": true,
+    "remainingReports": 19,
+    "reportsExhausted": false
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+Each pair entry in `payload.pairs` carries the same structure as the Phase 3A
+`PairAnalysis` record — multi-timeframe structure map, active zone, confidence
+breakdown, M15 confirmation flags, signal lifecycle state, trade plan (when
+confirmed), fundamental assessment, conflict flags, the five Claude-generated
+text fields (`setupStatus`, `shortReasoning`, `executiveReasoning`,
+`invalidationNote`, `fundamentalSummary` — PRD §8.4), and the display layer
+(`technical_primary`, `fundamental_supporting`, `avoid_note`).
+The full schema is fixed in the Phase 3A engine output.
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 ACCOUNT_INACTIVE` — authenticated user is not active.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user.
+- `409 MARKET_CLOSED` — forex market is currently closed.
+- `409 DAILY_LIMIT_REACHED` — report already generated for the current forex day.
+- `409 NO_REMAINING_REPORTS` — zero remaining reports.
+- `503 MARKET_DATA_NOT_READY` — pre-fetch has not yet produced a complete cycle.
+   The client should retry after a short delay; no report credit is consumed.
+- `503 MARKET_DATA_UNAVAILABLE` — upstream OHLCV provider failed after retries.
+- `503 NARRATIVE_UNAVAILABLE` — Claude API failed after retries. The structured
+   analysis was computed but the per-pair text fields could not be generated.
+
+### `GET /reports/today`
+
+Returns the authenticated user's report for the current forex market day if one
+exists. Does not trigger generation.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+- The `user_reports` row keyed by `(user_id, forex_market_date)` is loaded where
+  `forex_market_date = ForexMarketClock.currentForexMarketDate()`.
+- If no row exists, the endpoint returns `200 OK` with `data` omitted from the
+  response (per the envelope's `@JsonInclude(NON_NULL)` rule). The frontend treats
+  the absence of `data` as "not yet generated today".
+- If a row exists, the linked `market_analysis.payload` JSONB is deserialised and
+  the response shape matches `POST /reports/generate` exactly. The current
+  `remaining_reports` value from the subscription is included for dashboard
+  convenience — it reflects the live counter, not a frozen value.
+- `reportsExhausted` is always `false` on this endpoint; the flag's meaning is
+  "this call caused remaining to hit zero", which is generation-only.
+
+**Success response (200) — report exists:**
+
+Same shape as `POST /reports/generate`.
+
+**Success response (200) — no report yet today:**
+
+```json
+{
+  "success": true,
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user.
+- `500 INTERNAL_ERROR` — the stored payload could not be deserialised. This is a
+   defensive branch only; the stored format is fixed by the Phase 3A
+   `ReportPayload` record.

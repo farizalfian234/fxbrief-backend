@@ -36,11 +36,14 @@ public class MarketAnalysisWriter {
      */
     @Transactional
     public MarketAnalysis saveOrReturnExisting(UUID fetchId, String payloadJson,
-                                               String narrativeMode, short invalidPairCount,
-                                               Instant marketDataFetchedAt, Instant calendarFetchedAt) {
+                                               String summary, String narrativeMode,
+                                               short invalidPairCount,
+                                               Instant marketDataFetchedAt,
+                                               Instant calendarFetchedAt) {
         MarketAnalysis row = new MarketAnalysis();
         row.setFetchId(fetchId);
         row.setPayload(payloadJson);
+        row.setSummary(summary);
         row.setNarrativeMode(narrativeMode);
         row.setInvalidPairCount(invalidPairCount);
         row.setMarketDataFetchedAt(marketDataFetchedAt);

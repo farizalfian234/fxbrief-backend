@@ -24,6 +24,10 @@ import java.util.UUID;
  *
  * Per DECISIONS D-044, this is the shared-analysis architecture: Claude cost
  * scales with fetch cycles (~23/day), not with user request count.
+ *
+ * Phase 3B adds {@code summary} — a short one-line headline composed at
+ * write time and copied verbatim onto every {@code user_reports} row that
+ * references this analysis.
  */
 @Entity
 @Table(name = "market_analysis")
@@ -42,6 +46,9 @@ public class MarketAnalysis {
     @JdbcTypeCode(SqlTypes.JSON)
     @Column(nullable = false, columnDefinition = "jsonb")
     private String payload;
+
+    @Column(nullable = false, length = 100)
+    private String summary;
 
     @Column(name = "narrative_mode", nullable = false, length = 32)
     private String narrativeMode;

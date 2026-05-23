@@ -1,6 +1,5 @@
 package com.fxbrief.analysis.service;
 
-import com.fxbrief.analysis.dto.ConfidenceScoreView;
 import com.fxbrief.analysis.dto.FundamentalAssessment;
 import com.fxbrief.analysis.dto.MarketStructureView;
 import com.fxbrief.analysis.dto.PairAnalysis;
@@ -15,8 +14,8 @@ import java.util.Optional;
 /**
  * Best-pair selection per PRD §7.11. Ranked tiers (first match wins):
  * <ol>
- *   <li>Confirmed setup with high confidence (clean technical alignment)</li>
- *   <li>Awaiting Confirmation with high confidence</li>
+ *   <li>Confirmed setup — ranked within-tier by confidence score descending</li>
+ *   <li>Awaiting Confirmation — ranked within-tier by confidence score descending</li>
  *   <li>Strongly trending pair on W and D (no setup yet)</li>
  *   <li>Conflicting setup with valid zone (still tradable with caution)</li>
  *   <li>Strongest fundamental signal if no technical signal anywhere</li>
@@ -26,6 +25,16 @@ import java.util.Optional;
  * structure event. Returns empty when all markets are consolidating with
  * no technical or fundamental signal — caller surfaces that as the
  * "no report consumed" path per PRD §10.2.
+ *
+ * <h2>History note</h2>
+ * Earlier versions of Tier 1 and Tier 2 required {@code level == HIGH} (the
+ * 11–15 score band per PRD §7.6). That gate produced surprising selections
+ * when no pair reached the HIGH band: a Confirmed setup with score +1 could
+ * lose to a low-conviction conflict-warning pair, because the confidence
+ * level filter pushed both Tier 1 candidates out and Tier 4 then claimed the
+ * winner. The within-tier {@code Comparator.comparingInt(...score)} in
+ * {@link #pickHighest} already implements the "highest confidence wins"
+ * tiebreaker the PRD specifies, so the level gate has been removed.
  */
 @Service
 public class BestPairSelector {
@@ -36,15 +45,13 @@ public class BestPairSelector {
         }
 
         Optional<PairAnalysis> tier1 = pickHighest(analyses,
-                a -> a.signalState() == SignalState.CONFIRMED
-                        && isHighConfidence(a.confidence()));
+                a -> a.signalState() == SignalState.CONFIRMED);
         if (tier1.isPresent()) {
             return tier1.map(PairAnalysis::pair);
         }
 
         Optional<PairAnalysis> tier2 = pickHighest(analyses,
-                a -> a.signalState() == SignalState.AWAITING_CONFIRMATION
-                        && isHighConfidence(a.confidence()));
+                a -> a.signalState() == SignalState.AWAITING_CONFIRMATION);
         if (tier2.isPresent()) {
             return tier2.map(PairAnalysis::pair);
         }
@@ -113,10 +120,6 @@ public class BestPairSelector {
                 .max(Comparator
                         .comparingInt((PairAnalysis a) -> a.confidence() != null ? a.confidence().score() : 0)
                         .thenComparing(this::structureRecency));
-    }
-
-    private boolean isHighConfidence(ConfidenceScoreView confidence) {
-        return confidence != null && confidence.level() == ConfidenceScoreView.ConfidenceLevel.HIGH;
     }
 
     private boolean isStronglyTrending(PairAnalysis a) {

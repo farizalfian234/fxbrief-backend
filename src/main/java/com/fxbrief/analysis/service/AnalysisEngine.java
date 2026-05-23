@@ -5,12 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.analysis.config.AnalysisProperties;
 import com.fxbrief.analysis.dto.FundamentalAssessment;
 import com.fxbrief.analysis.dto.PairAnalysis;
+import com.fxbrief.analysis.dto.PairNarrativeFields;
 import com.fxbrief.analysis.dto.ReportPayload;
 import com.fxbrief.analysis.entity.MarketAnalysis;
 import com.fxbrief.analysis.entity.Pair;
 import com.fxbrief.analysis.repository.MarketAnalysisRepository;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.report.service.ReportSummaryComposer;
 import jakarta.annotation.PreDestroy;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -39,10 +41,10 @@ import java.util.concurrent.TimeUnit;
  *   <li>Resolve the current {@code fetch_id} from the cache.</li>
  *   <li>If a {@code market_analysis} row already exists for that id, return
  *       its stored {@link ReportPayload} immediately — no Claude call.</li>
- *   <li>On miss: run SMC for all 8 pairs, generate narratives via the
- *       mega-call (with per-pair fallback for invalid narratives and
- *       optional shadow logging), persist to {@code market_analysis},
- *       return the payload.</li>
+ *   <li>On miss: run SMC for all 8 pairs, generate the five Claude text
+ *       fields per pair plus a report-level summary via the mega-call (with
+ *       per-pair fallback for invalid pairs and optional shadow logging),
+ *       persist to {@code market_analysis}, return the row.</li>
  * </ol>
  *
  * <h2>Plan-agnostic generation (DECISIONS D-042)</h2>
@@ -59,7 +61,7 @@ import java.util.concurrent.TimeUnit;
  * consistent.
  *
  * This method does not persist {@code user_reports} and does not consume
- * a report credit — those concerns live in Phase 3B.
+ * a report credit — those concerns live in {@code report/} (Phase 3B).
  */
 @Slf4j
 @Service
@@ -80,6 +82,7 @@ public class AnalysisEngine {
     private final MegaCallNarrativeService megaCallNarrativeService;
     private final MarketAnalysisRepository marketAnalysisRepository;
     private final MarketAnalysisWriter marketAnalysisWriter;
+    private final ReportSummaryComposer summaryComposer;
     private final ObjectMapper objectMapper;
     private final AnalysisProperties analysisProperties;
     private final ExecutorService narrativePool;
@@ -92,6 +95,7 @@ public class AnalysisEngine {
                           MegaCallNarrativeService megaCallNarrativeService,
                           MarketAnalysisRepository marketAnalysisRepository,
                           MarketAnalysisWriter marketAnalysisWriter,
+                          ReportSummaryComposer summaryComposer,
                           ObjectMapper objectMapper,
                           AnalysisProperties analysisProperties) {
         this.marketDataReader = marketDataReader;
@@ -102,6 +106,7 @@ public class AnalysisEngine {
         this.megaCallNarrativeService = megaCallNarrativeService;
         this.marketAnalysisRepository = marketAnalysisRepository;
         this.marketAnalysisWriter = marketAnalysisWriter;
+        this.summaryComposer = summaryComposer;
         this.objectMapper = objectMapper;
         this.analysisProperties = analysisProperties;
         this.narrativePool = Executors.newFixedThreadPool(NARRATIVE_POOL_SIZE, runnable -> {
@@ -112,11 +117,14 @@ public class AnalysisEngine {
     }
 
     /**
-     * Returns the report payload for the current fetch cycle. Reuses an
-     * existing {@code market_analysis} row when one exists; otherwise runs
-     * the full pipeline and persists.
+     * Returns the shared analysis row for the current fetch cycle alongside its
+     * deserialised payload. Reuses an existing {@code market_analysis} row when
+     * one exists; otherwise runs the full pipeline and persists.
+     *
+     * The row is returned so callers can foreign-key against {@code id} and copy
+     * {@code summary} into per-user storage without a second SELECT.
      */
-    public ReportPayload runAnalysis() {
+    public AnalysisResult runAnalysis() {
         UUID fetchId = marketDataReader.resolveCurrentFetchId()
                 .orElseThrow(() -> new DomainException(
                         ErrorCodes.MARKET_DATA_NOT_READY,
@@ -126,14 +134,15 @@ public class AnalysisEngine {
         Optional<MarketAnalysis> existing = marketAnalysisRepository.findByFetchId(fetchId);
         if (existing.isPresent()) {
             log.info("Reusing existing market_analysis for fetch_id={}", fetchId);
-            return deserialise(existing.get().getPayload());
+            MarketAnalysis row = existing.get();
+            return new AnalysisResult(row, deserialise(row.getPayload()));
         }
 
         log.info("No market_analysis for fetch_id={} — running full pipeline", fetchId);
         return computeAndPersist(fetchId);
     }
 
-    private ReportPayload computeAndPersist(UUID fetchId) {
+    private AnalysisResult computeAndPersist(UUID fetchId) {
         Instant now = Instant.now();
         Optional<MarketDataReader.CalendarSnapshot> calendar = marketDataReader.readCalendar();
         Map<String, FundamentalAssessment> fundamentals = calendar
@@ -180,16 +189,26 @@ public class AnalysisEngine {
                 latestMarketFetch,
                 calendarFetchedAt);
 
-        persistAnalysis(fetchId, payload, outcome.mode(), outcome.invalidCount(),
-                latestMarketFetch, calendarFetchedAt);
+        // Summary source priority:
+        //   1. Mega-call result (Claude per PRD §8.4)
+        //   2. Java composer fallback (DECISIONS D-051)
+        String summary = outcome.megaSummary();
+        if (summary == null || summary.isBlank()) {
+            summary = summaryComposer.compose(payload);
+            log.info("Using Java-composed summary fallback for fetch_id={}", fetchId);
+        }
 
-        return payload;
+        MarketAnalysis row = persistAnalysis(fetchId, payload, summary, outcome.mode(),
+                outcome.invalidCount(), latestMarketFetch, calendarFetchedAt);
+
+        return new AnalysisResult(row, payload);
     }
 
     /**
      * Drives narrative generation per DECISIONS D-045:
      * <ol>
-     *   <li>Attempt the mega-call.</li>
+     *   <li>Attempt the mega-call. Capture per-pair fields plus the
+     *       report-level summary.</li>
      *   <li>For any pair that failed mega-call validation (or all pairs if
      *       the mega-call threw), fall back to a per-pair call.</li>
      *   <li>If shadow logging is enabled, also run per-pair calls for
@@ -197,20 +216,25 @@ public class AnalysisEngine {
      * </ol>
      */
     private NarrativeOutcome generateNarratives(List<PairAnalysis> analyses, UUID fetchId) {
-        Map<String, String> megaResults;
+        Map<String, PairNarrativeFields> megaFields;
+        String megaSummary;
         boolean megaFailed = false;
         try {
-            megaResults = megaCallNarrativeService.generateAll(analyses);
+            MegaCallNarrativeService.MegaCallResult megaResult =
+                    megaCallNarrativeService.generateAll(analyses);
+            megaFields = megaResult.perPair();
+            megaSummary = megaResult.summary();
         } catch (DomainException e) {
             log.warn("Mega-call failed entirely; falling back to per-pair for all pairs: {}", e.getMessage());
-            megaResults = Map.of();
+            megaFields = Map.of();
+            megaSummary = null;
             megaFailed = true;
         }
 
-        Map<String, String> finalNarratives = new LinkedHashMap<>(megaResults);
+        Map<String, PairNarrativeFields> finalFields = new LinkedHashMap<>(megaFields);
         List<PairAnalysis> needFallback = new ArrayList<>();
         for (PairAnalysis a : analyses) {
-            if (!finalNarratives.containsKey(a.pair())) {
+            if (!finalFields.containsKey(a.pair())) {
                 needFallback.add(a);
             }
         }
@@ -219,21 +243,21 @@ public class AnalysisEngine {
             log.info("Per-pair fallback required for {} pair(s): {}",
                     needFallback.size(),
                     needFallback.stream().map(PairAnalysis::pair).toList());
-            Map<String, String> fallbackNarratives = generatePerPairParallel(needFallback);
-            finalNarratives.putAll(fallbackNarratives);
+            Map<String, PairNarrativeFields> fallbackFields = generatePerPairParallel(needFallback);
+            finalFields.putAll(fallbackFields);
         }
 
         if (analysisProperties.shadowNarrativeLogging() != null
                 && analysisProperties.shadowNarrativeLogging().enabled()
                 && !megaFailed) {
-            runShadowComparison(analyses, megaResults, fetchId);
+            runShadowComparison(analyses, megaFields, fetchId);
         }
 
-        List<PairAnalysis> withNarratives = new ArrayList<>(analyses.size());
+        List<PairAnalysis> withFields = new ArrayList<>(analyses.size());
         for (PairAnalysis a : analyses) {
-            String narrative = finalNarratives.getOrDefault(a.pair(),
-                    ClaudeNarrativeGenerator.NARRATIVE_FALLBACK);
-            withNarratives.add(withNarrative(a, narrative));
+            PairNarrativeFields fields = finalFields.getOrDefault(a.pair(),
+                    PairNarrativeFields.fallback());
+            withFields.add(withClaudeFields(a, fields));
         }
 
         String mode;
@@ -244,15 +268,11 @@ public class AnalysisEngine {
         } else {
             mode = NARRATIVE_MODE_HYBRID;
         }
-        return new NarrativeOutcome(withNarratives, mode, (short) needFallback.size());
+        return new NarrativeOutcome(withFields, mode, (short) needFallback.size(), megaSummary);
     }
 
-    /**
-     * Generates per-pair narratives in parallel via the bounded executor.
-     * Used for the fallback path AND for shadow logging.
-     */
-    private Map<String, String> generatePerPairParallel(List<PairAnalysis> pairs) {
-        Map<String, CompletableFuture<String>> futures = new LinkedHashMap<>();
+    private Map<String, PairNarrativeFields> generatePerPairParallel(List<PairAnalysis> pairs) {
+        Map<String, CompletableFuture<PairNarrativeFields>> futures = new LinkedHashMap<>();
         for (PairAnalysis a : pairs) {
             futures.put(a.pair(), CompletableFuture.supplyAsync(
                     () -> perPairNarrativeGenerator.generate(a), narrativePool));
@@ -266,59 +286,68 @@ public class AnalysisEngine {
                     NARRATIVE_TIMEOUT_SECONDS, e.getMessage());
         }
 
-        Map<String, String> result = new LinkedHashMap<>();
+        Map<String, PairNarrativeFields> result = new LinkedHashMap<>();
         futures.forEach((pair, future) -> {
             if (future.isDone() && !future.isCompletedExceptionally()) {
                 try {
-                    result.put(pair, future.getNow(ClaudeNarrativeGenerator.NARRATIVE_FALLBACK));
+                    result.put(pair, future.getNow(PairNarrativeFields.fallback()));
                 } catch (Exception e) {
-                    result.put(pair, ClaudeNarrativeGenerator.NARRATIVE_FALLBACK);
+                    result.put(pair, PairNarrativeFields.fallback());
                 }
             } else {
                 future.cancel(true);
-                result.put(pair, ClaudeNarrativeGenerator.NARRATIVE_FALLBACK);
+                result.put(pair, PairNarrativeFields.fallback());
             }
         });
         return result;
     }
 
-    /**
-     * Runs per-pair narratives for every successfully-mega-validated pair
-     * and writes the comparison to {@code narrative_qa_log}. Doubles Claude
-     * cost while shadow mode is on — intended for the first 2-4 weeks of
-     * production then disabled (DECISIONS D-046).
-     */
     private void runShadowComparison(List<PairAnalysis> analyses,
-                                     Map<String, String> megaNarratives,
+                                     Map<String, PairNarrativeFields> megaFields,
                                      UUID fetchId) {
         List<PairAnalysis> toShadow = analyses.stream()
-                .filter(a -> megaNarratives.containsKey(a.pair()))
+                .filter(a -> megaFields.containsKey(a.pair()))
                 .toList();
         if (toShadow.isEmpty()) {
             return;
         }
-        Map<String, String> perPair = generatePerPairParallel(toShadow);
+        Map<String, PairNarrativeFields> perPair = generatePerPairParallel(toShadow);
         for (PairAnalysis a : toShadow) {
-            String mega = megaNarratives.get(a.pair());
-            String solo = perPair.getOrDefault(a.pair(), ClaudeNarrativeGenerator.NARRATIVE_FALLBACK);
-            // Simple divergence heuristic — material length difference or absent shared substrings.
-            // The real value is in human spot-checking; this flag is just to make sampling efficient.
+            PairNarrativeFields mega = megaFields.get(a.pair());
+            PairNarrativeFields solo = perPair.getOrDefault(a.pair(), PairNarrativeFields.fallback());
             boolean diverged = isDivergent(mega, solo);
             String reason = diverged ? "length or content drift" : null;
+            // Concatenate the five fields per side for the shadow log — keeps
+            // the existing narrative_qa_log schema usable without migration.
+            String megaJoined = joinFields(mega);
+            String soloJoined = joinFields(solo);
             try {
-                marketAnalysisWriter.logShadow(fetchId, a.pair(), mega, solo, diverged, reason);
+                marketAnalysisWriter.logShadow(fetchId, a.pair(), megaJoined, soloJoined, diverged, reason);
             } catch (Exception e) {
                 log.warn("Shadow log write failed for {}: {}", a.pair(), e.getMessage());
             }
         }
     }
 
-    private boolean isDivergent(String mega, String solo) {
+    private String joinFields(PairNarrativeFields f) {
+        if (f == null) return "";
+        return "[setupStatus] " + nullSafe(f.setupStatus())
+                + "\n[shortReasoning] " + nullSafe(f.shortReasoning())
+                + "\n[executiveReasoning] " + nullSafe(f.executiveReasoning())
+                + "\n[invalidationNote] " + nullSafe(f.invalidationNote())
+                + "\n[fundamentalSummary] " + nullSafe(f.fundamentalSummary());
+    }
+
+    private String nullSafe(String s) {
+        return s == null ? "" : s;
+    }
+
+    private boolean isDivergent(PairNarrativeFields mega, PairNarrativeFields solo) {
         if (mega == null || solo == null) {
             return true;
         }
-        int megaLen = mega.length();
-        int soloLen = solo.length();
+        int megaLen = joinFields(mega).length();
+        int soloLen = joinFields(solo).length();
         if (megaLen == 0 || soloLen == 0) {
             return true;
         }
@@ -326,15 +355,16 @@ public class AnalysisEngine {
         return ratio < 0.5;
     }
 
-    private void persistAnalysis(UUID fetchId, ReportPayload payload, String mode,
-                                 short invalidCount, Instant marketDataFetchedAt,
-                                 Instant calendarFetchedAt) {
+    private MarketAnalysis persistAnalysis(UUID fetchId, ReportPayload payload, String summary,
+                                           String mode, short invalidCount,
+                                           Instant marketDataFetchedAt, Instant calendarFetchedAt) {
         try {
             String json = objectMapper.writeValueAsString(payload);
-            marketAnalysisWriter.saveOrReturnExisting(
-                    fetchId, json, mode, invalidCount, marketDataFetchedAt, calendarFetchedAt);
+            MarketAnalysis saved = marketAnalysisWriter.saveOrReturnExisting(
+                    fetchId, json, summary, mode, invalidCount, marketDataFetchedAt, calendarFetchedAt);
             log.info("Persisted market_analysis fetch_id={} mode={} invalidPairs={}",
                     fetchId, mode, invalidCount);
+            return saved;
         } catch (JsonProcessingException e) {
             log.warn("Failed to serialise ReportPayload for fetch_id {}: {}", fetchId, e.getMessage());
             throw new DomainException(
@@ -356,7 +386,11 @@ public class AnalysisEngine {
         }
     }
 
-    private PairAnalysis withNarrative(PairAnalysis a, String narrative) {
+    /**
+     * Builds a new PairAnalysis instance with the five Claude text fields
+     * populated. All other fields are copied verbatim.
+     */
+    private PairAnalysis withClaudeFields(PairAnalysis a, PairNarrativeFields f) {
         return new PairAnalysis(
                 a.pair(),
                 a.structureByTimeframe(),
@@ -368,7 +402,11 @@ public class AnalysisEngine {
                 a.fundamental(),
                 a.htfConflict(),
                 a.fundamentalConflict(),
-                narrative,
+                f.setupStatus(),
+                f.shortReasoning(),
+                f.executiveReasoning(),
+                f.invalidationNote(),
+                f.fundamentalSummary(),
                 a.layer());
     }
 
@@ -394,5 +432,12 @@ public class AnalysisEngine {
         }
     }
 
-    private record NarrativeOutcome(List<PairAnalysis> analyses, String mode, short invalidCount) {}
+    private record NarrativeOutcome(
+            List<PairAnalysis> analyses,
+            String mode,
+            short invalidCount,
+            String megaSummary
+    ) {}
+
+    public record AnalysisResult(MarketAnalysis row, ReportPayload payload) {}
 }
