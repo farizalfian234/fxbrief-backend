@@ -1,6 +1,8 @@
 package com.fxbrief.report.repository;
 
 import com.fxbrief.report.entity.UserReport;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
@@ -9,6 +11,7 @@ import org.springframework.stereotype.Repository;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Optional;
 
 @Repository
@@ -25,4 +28,25 @@ public interface UserReportRepository extends JpaRepository<UserReport, Long> {
     @Query("UPDATE UserReport r SET r.archived = true, r.archivedAt = :archivedAt " +
            "WHERE r.archived = false AND r.forexMarketDate <= :cutoff")
     int archiveOnOrBefore(@Param("cutoff") LocalDate cutoff, @Param("archivedAt") Instant archivedAt);
+
+    /**
+     * Returns archived rows for the given user, newest forex market day first.
+     * Pagination is sliced from the result set in the order it is returned.
+     */
+    @Query("SELECT r FROM UserReport r WHERE r.user.id = :userId AND r.archived = true " +
+           "ORDER BY r.forexMarketDate DESC, r.id DESC")
+    List<UserReport> findArchivedByUserId(@Param("userId") Long userId, Pageable pageable);
+
+    /**
+     * Paged variant returning the total archived count alongside the slice — used by
+     * the Premium history endpoint where the frontend renders page controls.
+     */
+    @Query(value = "SELECT r FROM UserReport r WHERE r.user.id = :userId AND r.archived = true " +
+                   "ORDER BY r.forexMarketDate DESC, r.id DESC",
+           countQuery = "SELECT COUNT(r) FROM UserReport r WHERE r.user.id = :userId AND r.archived = true")
+    Page<UserReport> findArchivedPageByUserId(@Param("userId") Long userId, Pageable pageable);
+
+    long countByUserIdAndArchivedTrue(Long userId);
+
+    Optional<UserReport> findByIdAndUserIdAndArchivedTrue(Long id, Long userId);
 }

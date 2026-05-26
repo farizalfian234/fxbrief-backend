@@ -2,14 +2,18 @@ package com.fxbrief.report.controller;
 
 import com.fxbrief.auth.security.AuthenticatedUser;
 import com.fxbrief.common.dto.ApiResponse;
+import com.fxbrief.report.dto.HistoryView;
 import com.fxbrief.report.dto.ReportView;
 import com.fxbrief.report.service.ReportGenerationService;
+import com.fxbrief.report.service.ReportHistoryService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 @RestController
@@ -18,6 +22,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class ReportController {
 
     private final ReportGenerationService reportGenerationService;
+    private final ReportHistoryService reportHistoryService;
 
     @PostMapping("/generate")
     public ResponseEntity<ApiResponse<ReportView>> generate(
@@ -31,5 +36,21 @@ public class ReportController {
             @AuthenticationPrincipal AuthenticatedUser principal) {
         return ResponseEntity.ok(ApiResponse.success(
                 reportGenerationService.getTodayReport(principal.id()).orElse(null)));
+    }
+
+    @GetMapping("/history")
+    public ResponseEntity<ApiResponse<HistoryView>> getHistory(
+            @AuthenticationPrincipal AuthenticatedUser principal,
+            @RequestParam(name = "page", defaultValue = "1") int page) {
+        return ResponseEntity.ok(ApiResponse.success(
+                reportHistoryService.getHistory(principal.id(), page)));
+    }
+
+    @GetMapping("/history/{reportId}")
+    public ResponseEntity<ApiResponse<ReportView>> getArchivedReport(
+            @AuthenticationPrincipal AuthenticatedUser principal,
+            @PathVariable Long reportId) {
+        return ResponseEntity.ok(ApiResponse.success(
+                reportHistoryService.getArchivedReport(principal.id(), reportId)));
     }
 }

@@ -80,6 +80,20 @@ public class SubscriptionService {
     }
 
     /**
+     * Returns the plan label the frontend would render right now for this user —
+     * the persisted base plan downgraded to Free when the lapse condition fires
+     * (PRD §5.4, D-033). Read-only; no state changes.
+     *
+     * Exposed for callers that gate behaviour on the effective plan but do not
+     * need the full subscription projection (e.g. the report-history endpoint
+     * deciding whether to lock the response).
+     */
+    @Transactional(readOnly = true)
+    public PlanView getEffectivePlanFor(Long userId) {
+        return toPlanView(resolveEffectivePlan(loadSubscription(userId)));
+    }
+
+    /**
      * Initiates a top-up and returns the carry-over preview for the frontend warning
      * modal. No persistent state is changed: the actual plan change and report-count
      * mutation are performed by Phase 5B on Midtrans payment confirmation.

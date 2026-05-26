@@ -736,8 +736,11 @@ payment.
 ### `POST /reports/generate`
 
 Generates the authenticated user's report for the current forex market day. The
-response carries the full Premium-depth analysis payload; the frontend filters by
-the caller's plan at render time.
+response shape is narrowed at the backend by the row's frozen
+`planAtGeneration` so each plan receives only the data its UI renders
+(D-055). The frontend branches on `planAtGeneration` to know whether to read
+`payload.pairs[]` (Premium) or `payload.bestPairView` + `payload.compactPreviews`
+(Free/Basic).
 
 **Authentication:** required (Bearer JWT)
 
@@ -770,6 +773,14 @@ The request is processed in three phases.
    rule, PRD §5.5). A `user_reports` row is inserted referencing the `market_analysis`
    row with `summary` copied verbatim and `plan_at_generation` set to the
    subscription's current base plan id.
+4. **Response narrowing.** The deserialised payload is run through
+   `ReportPayloadNarrower.narrowForLive` keyed on the new row's
+   `planAtGeneration`. Free/Basic responses receive a `NarrowedReportPayload`
+   carrying only `bestPairView` + three `compactPreviews`; Premium responses
+   receive the full `ReportPayload` with `layer`, internal engine indices, and
+   low-importance economic events trimmed. The stored
+   `market_analysis.payload` JSONB always contains the full Premium-depth
+   content; narrowing is purely a read-time projection (D-055).
 
 The response includes a `reportsExhausted` flag that is `true` when this generation
 caused `remaining_reports` to reach zero. Phase 5A consumes this signal to send the
@@ -779,7 +790,7 @@ The shared-analysis layer makes generation cheap for every user beyond the first
 each fetch cycle: subsequent callers in the same cycle reuse the existing
 `market_analysis` row with no Claude call.
 
-**Success response (200):**
+**Success response (200) — Premium:**
 
 ```json
 {
@@ -795,7 +806,16 @@ each fetch cycle: subsequent callers in the same cycle reuse the existing
           "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
           "executiveReasoning": "...",
           "invalidationNote": "Bullish bias invalidates if H4 closes below 1.27500.",
-          "fundamentalSummary": "..." }
+          "fundamentalSummary": "...",
+          "structureByTimeframe": { "...": "..." },
+          "activeZone": { "...": "..." },
+          "confidence": { "score": 11, "level": "HIGH", "factors": [ "..." ] },
+          "m15Confirmation": { "...": "..." },
+          "tradePlan": { "direction": "LONG", "entryLow": 1.27500, "entryHigh": 1.27650, "takeProfit": 1.28400, "stopLoss": 1.27300 },
+          "fundamental": { "currency": "GBP", "bias": "BULLISH", "highImpactThisWeek": true, "events": [ "Medium/High importance only" ] },
+          "htfConflict": false,
+          "fundamentalConflict": false,
+          "layer": null }
       ],
       "marketsConsolidating": false,
       "generatedAt": "2026-05-17T08:00:00Z",
@@ -813,14 +833,70 @@ each fetch cycle: subsequent callers in the same cycle reuse the existing
 }
 ```
 
-Each pair entry in `payload.pairs` carries the same structure as the Phase 3A
-`PairAnalysis` record — multi-timeframe structure map, active zone, confidence
-breakdown, M15 confirmation flags, signal lifecycle state, trade plan (when
-confirmed), fundamental assessment, conflict flags, the five Claude-generated
-text fields (`setupStatus`, `shortReasoning`, `executiveReasoning`,
-`invalidationNote`, `fundamentalSummary` — PRD §8.4), and the display layer
-(`technical_primary`, `fundamental_supporting`, `avoid_note`).
-The full schema is fixed in the Phase 3A engine output.
+Each pair entry in Premium `payload.pairs` carries the same structure as the
+Phase 3A `PairAnalysis` record (multi-timeframe structure map, active zone,
+confidence breakdown, M15 confirmation flags, signal lifecycle state, trade
+plan, fundamental assessment, conflict flags, and the five Claude-generated
+text fields per PRD §8.4) with three audit-driven trims applied:
+`layer` is `null`, internal engine indices (`formedBarIndex`, swing
+`barIndex`) are `0`, and `fundamental.events` is filtered to Medium and
+High importance only.
+
+**Success response (200) — Free or Basic:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "reportId": 17,
+    "summary": "3 setups available — GBP/USD best opportunity",
+    "payload": {
+      "bestPair": "GBP/USD",
+      "bestPairView": {
+        "pair": "GBP/USD",
+        "dailyBias": "BULLISH",
+        "confidenceLevel": "HIGH",
+        "majorNewsRisk": true,
+        "signalState": "CONFIRMED",
+        "setupStatus": "Confirmed long near H4 demand — high conviction",
+        "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+        "tradePlan": { "direction": "LONG", "entryLow": 1.27500, "entryHigh": 1.27650, "takeProfit": 1.28400, "stopLoss": 1.27300 }
+      },
+      "compactPreviews": [
+        { "pair": "EUR/USD", "dailyBias": "BEARISH", "signalState": "AWAITING_CONFIRMATION" },
+        { "pair": "USD/JPY", "dailyBias": "RANGING", "signalState": "DETECTED" },
+        { "pair": "AUD/USD", "dailyBias": "BULLISH", "signalState": "EXPIRED" }
+      ],
+      "marketsConsolidating": false,
+      "generatedAt": "2026-05-17T08:00:00Z",
+      "marketDataFetchedAt": "2026-05-17T07:55:00Z"
+    },
+    "forexMarketDate": "2026-05-18",
+    "generatedAt": "2026-05-17T08:00:00Z",
+    "planAtGeneration": "BASIC",
+    "countedAgainstLimit": true,
+    "remainingReports": 4,
+    "reportsExhausted": false
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+`bestPairView` carries the eight fields PRD §8.2 specifies for both the
+Summary Section (`pair`, `dailyBias`, `confidenceLevel`, `majorNewsRisk`,
+`signalState`) and the Best Pair Card (`pair`, `dailyBias`,
+`confidenceLevel`, `setupStatus`, `shortReasoning`, `tradePlan`, plus
+`signalState` for the locked-button state). `compactPreviews` is exactly
+three entries — highest, middle, lowest confidence score among non-best
+pairs — driving the dashboard's "Additional Market Coverage — Unlock
+Premium" upsell. No other per-pair fields are on the wire.
+`calendarFetchedAt` is also absent from the narrowed payload (Free/Basic
+do not render economic events).
+
+The "markets consolidating" case for Free/Basic carries
+`bestPairView: null` and `compactPreviews: null` (both omitted via
+`@JsonInclude(NON_NULL)`); the frontend renders this state from
+`marketsConsolidating: true` alone.
 
 **Errors:**
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
@@ -851,15 +927,19 @@ exists. Does not trigger generation.
   response (per the envelope's `@JsonInclude(NON_NULL)` rule). The frontend treats
   the absence of `data` as "not yet generated today".
 - If a row exists, the linked `market_analysis.payload` JSONB is deserialised and
-  the response shape matches `POST /reports/generate` exactly. The current
-  `remaining_reports` value from the subscription is included for dashboard
-  convenience — it reflects the live counter, not a frozen value.
+  run through `ReportPayloadNarrower.narrowForLive` keyed on the row's frozen
+  `planAtGeneration` (D-055). The response shape matches `POST /reports/generate`
+  exactly: Premium gets the full payload with trims; Free/Basic get
+  `bestPairView` + three `compactPreviews`. The current `remaining_reports` value
+  from the subscription is included for dashboard convenience — it reflects the
+  live counter, not a frozen value.
 - `reportsExhausted` is always `false` on this endpoint; the flag's meaning is
   "this call caused remaining to hit zero", which is generation-only.
 
 **Success response (200) — report exists:**
 
-Same shape as `POST /reports/generate`.
+Same shape as `POST /reports/generate` — Premium gets the full `pairs[]` array
+with audit trims; Free/Basic get `bestPairView` and three `compactPreviews`.
 
 **Success response (200) — no report yet today:**
 
@@ -876,3 +956,195 @@ Same shape as `POST /reports/generate`.
 - `500 INTERNAL_ERROR` — the stored payload could not be deserialised. This is a
    defensive branch only; the stored format is fixed by the Phase 3A
    `ReportPayload` record.
+
+### `GET /reports/history`
+
+Returns the authenticated user's archived report history. List view only — each
+row carries the date, the plan badge frozen at generation time, and the short
+summary string. The full payload is fetched on demand via
+`GET /reports/history/{reportId}`.
+
+Access is gated by the **effective plan** (PRD §5.4). A user whose base plan
+is Basic or Premium but whose remaining reports lapsed across a forex day
+boundary sees the same locked response a Free user does; topping up restores
+visibility immediately.
+
+**Authentication:** required (Bearer JWT)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Only consulted for
+  Premium effective plan; ignored otherwise. Values below `1` are clamped to
+  `1`. Values past the last page return `items: []` with the true
+  `totalPages` so the frontend can correct its state.
+
+**Behaviour:**
+- Effective plan `FREE` (Free users and lapsed Basic/Premium users) — returns
+  `locked: true` with an empty `items` list and zeroed counters. The
+  frontend renders the blurred-table upsell. No row counts are disclosed.
+- Effective plan `BASIC` — returns at most the latest ten archived rows in
+  `items`, ordered newest forex market day first. `totalArchivedCount` is the
+  true total of archived reports for this user; the frontend uses it to
+  decide whether to render the "X older reports available in Premium"
+  message (shown only when `totalArchivedCount > 10`, per PRD §9.2). `page`
+  is always `1` and `totalPages` is `0` when there are no items, otherwise
+  `1` — the Basic view does not paginate.
+- Effective plan `PREMIUM` — returns the requested page of archived rows,
+  ten per page, ordered newest forex market day first. `totalArchivedCount`
+  is the total across all pages. `totalPages` reflects the full archive
+  size.
+- Today's not-yet-archived report is never included; the dashboard exposes
+  it via `GET /reports/today`. Archive flip happens at the daily 22:00 UTC
+  scheduler.
+- History rows are immutable. `planAtGeneration` is the plan code frozen at
+  write time — never re-evaluated against the user's current plan.
+
+**Success response (200) — Premium active, page 2 of 4 total pages:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "locked": false,
+    "items": [
+      {
+        "reportId": 314,
+        "forexMarketDate": "2026-05-17",
+        "planAtGeneration": "PREMIUM",
+        "summary": "3 setups available — GBP/USD best opportunity"
+      },
+      {
+        "reportId": 305,
+        "forexMarketDate": "2026-05-16",
+        "planAtGeneration": "PREMIUM",
+        "summary": "Markets consolidating — no clear setups"
+      }
+    ],
+    "totalArchivedCount": 37,
+    "page": 2,
+    "pageSize": 10,
+    "totalPages": 4
+  },
+  "timestamp": "2026-05-18T08:00:00Z"
+}
+```
+
+**Success response (200) — Free or lapsed:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "locked": true,
+    "items": [],
+    "totalArchivedCount": 0,
+    "page": 0,
+    "pageSize": 0,
+    "totalPages": 0
+  },
+  "timestamp": "2026-05-18T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — no subscription exists for the authenticated user.
+
+### `GET /reports/history/{reportId}`
+
+Returns an archived report identified by `reportId`. The response shape
+mirrors `POST /reports/generate` and `GET /reports/today` for the same
+plan, with one difference for Free/Basic: the `compactPreviews` array is
+omitted (no upsell affordance is exposed inside archived content per the
+"clean reading experience" rule — D-055).
+
+**Authentication:** required (Bearer JWT)
+
+**Path parameters:**
+- `reportId` — numeric report identifier from a previous history list entry.
+
+**Behaviour:**
+- Access is gated by effective plan, identically to `GET /reports/history`.
+  A user whose effective plan is `FREE` receives `404 NOT_FOUND` for any
+  `reportId` — no row counts or ids are disclosed to a locked viewer.
+- The report row must (a) exist, (b) belong to the authenticated user, and
+  (c) be archived. Otherwise `404 NOT_FOUND` is returned. The three
+  conditions are collapsed into a single non-disclosive `NOT_FOUND` so a
+  caller cannot probe ownership by id.
+- Content visibility follows the row's `planAtGeneration`, **not** the
+  caller's current plan. A report generated at Basic depth is returned at
+  Basic depth forever; a report generated at Premium depth is returned at
+  Premium depth forever. This preserves the immutability rule (PRD §8.1):
+  upgrading or downgrading after generation does not retroactively change
+  what a historical report contained.
+- The deserialised payload is run through
+  `ReportPayloadNarrower.narrowForArchived` keyed on the row's frozen
+  `planAtGeneration` (D-055):
+  - **Premium rows** receive the full `ReportPayload` with `layer`,
+    internal engine indices, and low-importance economic events trimmed
+    — identical to the Premium response on `POST /reports/generate`.
+  - **Basic and Free rows** receive a `NarrowedReportPayload` carrying
+    `bestPairView` only. `compactPreviews` is null and omitted via
+    `@JsonInclude(NON_NULL)`; no upsell affordance appears in archived
+    content. If `bestPair` is null or no matching pair entry is found
+    (consolidating-markets case), both `bestPairView` and
+    `compactPreviews` are absent and the frontend renders from
+    `marketsConsolidating: true` alone.
+- Narrowing is a pure read-time projection; the stored
+  `market_analysis.payload` always contains the full Premium-depth content
+  (engine always produces Premium-depth output, D-042) and is never
+  mutated.
+- `remainingReports` reflects the current live subscription counter (same
+  semantics as `GET /reports/today`), not a value frozen at archive time.
+- `reportsExhausted` is always `false` on this endpoint — its meaning
+  ("this call drove remaining to zero") applies only to generation.
+
+**Success response (200) — archived report whose `planAtGeneration` is `BASIC`:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "reportId": 314,
+    "summary": "3 setups available — GBP/USD best opportunity",
+    "payload": {
+      "bestPair": "GBP/USD",
+      "bestPairView": {
+        "pair": "GBP/USD",
+        "dailyBias": "BULLISH",
+        "confidenceLevel": "HIGH",
+        "majorNewsRisk": true,
+        "signalState": "CONFIRMED",
+        "setupStatus": "Confirmed long near H4 demand — high conviction",
+        "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+        "tradePlan": { "direction": "LONG", "entryLow": 1.27500, "entryHigh": 1.27650, "takeProfit": 1.28400, "stopLoss": 1.27300 }
+      },
+      "marketsConsolidating": false,
+      "generatedAt": "2026-05-17T08:00:00Z",
+      "marketDataFetchedAt": "2026-05-17T07:55:00Z"
+    },
+    "forexMarketDate": "2026-05-17",
+    "generatedAt": "2026-05-17T08:00:00Z",
+    "planAtGeneration": "BASIC",
+    "countedAgainstLimit": true,
+    "remainingReports": 12,
+    "reportsExhausted": false
+  },
+  "timestamp": "2026-05-18T08:00:00Z"
+}
+```
+
+Note: no `compactPreviews` field in the response. A Basic-generated report
+on the live dashboard (`GET /reports/today`) does carry that field; the
+archived view does not.
+
+A report whose `planAtGeneration` is `PREMIUM` returns the full payload —
+all eight pair entries in `payload.pairs` with the audit trims applied —
+regardless of the caller's current plan.
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `404 NOT_FOUND` — report does not exist, does not belong to the caller,
+  is not archived, the caller's effective plan is `FREE`, or the caller has
+  no subscription. The response does not disclose which.
+- `500 INTERNAL_ERROR` — the stored payload could not be deserialised.
+  Defensive branch only.

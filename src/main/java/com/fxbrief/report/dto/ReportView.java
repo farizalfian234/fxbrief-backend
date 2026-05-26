@@ -1,16 +1,29 @@
 package com.fxbrief.report.dto;
 
+import com.fxbrief.analysis.dto.NarrowedReportPayload;
 import com.fxbrief.analysis.dto.ReportPayload;
 
 import java.time.Instant;
 import java.time.LocalDate;
 
 /**
- * Wire shape for {@code POST /reports/generate} and {@code GET /reports/today}.
+ * Wire shape for the three single-report endpoints:
+ * {@code POST /reports/generate}, {@code GET /reports/today}, and
+ * {@code GET /reports/history/{reportId}}.
  *
- * Carries the full Premium-depth {@link ReportPayload} unconditionally — the
- * frontend filters by plan at render time (PRD §8.1, DECISIONS D-042).
+ * <h2>Payload polymorphism</h2>
+ * The {@code payload} field type is {@code Object} so the same envelope can
+ * carry either a full {@link ReportPayload} (Premium) or a
+ * {@link NarrowedReportPayload} (Free/Basic). Jackson serialises whichever
+ * concrete value is set; the {@code @JsonInclude(NON_NULL)} on
+ * {@code NarrowedReportPayload} means absent fields are omitted from the
+ * wire.
  *
+ * Narrowing is owned by {@code ReportPayloadNarrower}; this DTO carries
+ * whichever projection the narrower returned. See D-055 for the security
+ * rationale.
+ *
+ * <h2>Field meanings</h2>
  * {@code countedAgainstLimit} reflects whether this generation consumed a
  * report credit; {@code reportsExhausted} is {@code true} when the user just
  * hit zero remaining reports as a result of this call. Both fields drive
@@ -19,7 +32,7 @@ import java.time.LocalDate;
 public record ReportView(
         Long reportId,
         String summary,
-        ReportPayload payload,
+        Object payload,
         LocalDate forexMarketDate,
         Instant generatedAt,
         String planAtGeneration,

@@ -35,6 +35,12 @@ import java.util.Optional;
  *       engine manages its own short writes per DECISIONS D-039.</li>
  *   <li>{@link UserReportWriter#commit} — advisory lock, decrement, write.</li>
  * </ol>
+ *
+ * Both the generate response and the today-read pass through
+ * {@link ReportPayloadNarrower#narrowForLive} so Free and Basic users
+ * receive only the data their UI renders (D-055). The stored
+ * {@code market_analysis.payload} is never mutated — narrowing is purely
+ * a read-time projection over the deserialised structure.
  */
 @Slf4j
 @Service
@@ -48,6 +54,7 @@ public class ReportGenerationService {
     private final UserReportRepository userReportRepository;
     private final ForexMarketClock forexMarketClock;
     private final ObjectMapper objectMapper;
+    private final ReportPayloadNarrower payloadNarrower;
 
     public ReportView generate(Long userId) {
         LocalDate forexDate = forexMarketClock.currentForexMarketDate();
@@ -87,10 +94,13 @@ public class ReportGenerationService {
 
     private ReportView toView(UserReport report, ReportPayload payload,
                               int remainingReports, boolean reportsExhausted) {
+        Object narrowedPayload = payloadNarrower.narrowForLive(
+                payload, report.getPlanAtGeneration());
+
         return new ReportView(
                 report.getId(),
                 report.getSummary(),
-                payload,
+                narrowedPayload,
                 report.getForexMarketDate(),
                 report.getGeneratedAt(),
                 planCodeFor(report.getPlanAtGeneration()),
