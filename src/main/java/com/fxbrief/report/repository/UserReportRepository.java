@@ -19,6 +19,8 @@ public interface UserReportRepository extends JpaRepository<UserReport, Long> {
 
     Optional<UserReport> findByUserIdAndForexMarketDate(Long userId, LocalDate forexMarketDate);
 
+    Optional<UserReport> findByUserIdAndForexMarketDateAndArchivedFalse(Long userId, LocalDate forexMarketDate);
+
     /**
      * Bulk archive every non-archived row whose forex market date is on or before the
      * supplied cutoff. Used by the daily 22:00 UTC scheduler — once a forex market day

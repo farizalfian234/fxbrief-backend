@@ -32,5 +32,9 @@ public final class ErrorCodes {
     public static final String DAILY_LIMIT_REACHED = "DAILY_LIMIT_REACHED";
     public static final String NO_REMAINING_REPORTS = "NO_REMAINING_REPORTS";
 
+    public static final String USER_NOT_FOUND = "USER_NOT_FOUND";
+    public static final String CANNOT_MODIFY_ADMIN = "CANNOT_MODIFY_ADMIN";
+    public static final String INVALID_DATE_RANGE = "INVALID_DATE_RANGE";
+
     private ErrorCodes() {}
 }

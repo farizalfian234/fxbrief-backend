@@ -69,6 +69,9 @@ native actuator response shape.
 | `MARKET_CLOSED`               | 409  | Report generation attempted outside forex market hours (Friday 22:00 UTC → Sunday 22:00 UTC). Introduced in Phase 3B. |
 | `DAILY_LIMIT_REACHED`         | 409  | A `user_reports` row already exists for the authenticated user on the current forex market date. Introduced in Phase 3B. |
 | `NO_REMAINING_REPORTS`        | 409  | The authenticated user has zero remaining reports. Introduced in Phase 3B. |
+| `USER_NOT_FOUND`              | 404  | Admin lookup targeted a user id that does not exist. Introduced in Phase 4A. |
+| `CANNOT_MODIFY_ADMIN`         | 403  | Admin action targeted another admin user. Admin-on-admin mutation is disallowed to prevent accidental lock-out from the panel. Introduced in Phase 4A. |
+| `INVALID_DATE_RANGE`          | 400  | Admin usage-overview filter has `from` later than `to`. Introduced in Phase 4A. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -1148,3 +1151,349 @@ regardless of the caller's current plan.
   no subscription. The response does not disclose which.
 - `500 INTERNAL_ERROR` — the stored payload could not be deserialised.
   Defensive branch only.
+
+## Admin endpoints
+
+All endpoints under `/admin` require an `ADMIN` role on the JWT. Non-admin
+authenticated callers receive `403 FORBIDDEN`; unauthenticated callers receive
+`401 UNAUTHENTICATED`. The role check is enforced at two layers — the URL
+matcher in `SecurityConfig` (`requestMatchers("/admin/**").hasRole("ADMIN")`)
+and `@PreAuthorize("hasRole('ADMIN')")` on the controller class — for
+defence in depth.
+
+Admin actions targeting another admin user (manual top-up,
+activate/deactivate) return `403 CANNOT_MODIFY_ADMIN`. Admin users do not
+appear in the admin user list endpoint either, so the admin UI cannot
+accidentally surface them as actionable rows.
+
+Every successful mutation writes a row to `subscription_audit_logs` with the
+acting admin id in `performed_by` and one of the action values documented in
+D-034: `ADMIN_TOP_UP`, `ADMIN_PLAN_CHANGE`, `ADMIN_ACTIVATION`,
+`ADMIN_DEACTIVATION`. Activate/deactivate calls that are no-ops (target
+already in the requested state) do not write an audit row — the audit trail
+records state transitions, not button presses.
+
+### `GET /admin/dashboard/stats`
+
+Returns the quick-stats counter strip rendered at the top of the Admin
+Dashboard page. Analytics chart endpoints land in Phase 4B and complete the
+page; this endpoint covers the four static numbers PRD §9.3 specifies.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none
+
+**Behaviour:**
+- `totalActiveSubscribers` — count of `subscriptions` rows whose plan is
+  `BASIC` or `PREMIUM` and whose user has `is_active = true`.
+- `totalReportsCurrentForexMonth` — count of `user_reports` rows whose
+  `forex_market_date` falls within the calendar month of the current forex
+  market date (1st through last day inclusive, UTC, computed against
+  `ForexMarketClock#currentForexMarketDate()`).
+- `totalFreeUsersActive` — count of `subscriptions` rows on the `FREE` plan
+  whose user has `is_active = true`.
+- `usersAtZeroRemainingReports` — count of `subscriptions` rows where
+  `remaining_reports = 0`, irrespective of plan. Surfaces every user the
+  admin might want to nudge toward a top-up.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "totalActiveSubscribers": 14,
+    "totalReportsCurrentForexMonth": 217,
+    "totalFreeUsersActive": 83,
+    "usersAtZeroRemainingReports": 6
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `GET /admin/users`
+
+Returns a paginated list of non-admin users for the Admin Users page. Admin
+users are excluded from the result set so the panel cannot be used to lock
+another admin out.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1`
+  are clamped to `1`. Values past the last page return `items: []` with the
+  true `totalPages` so the frontend can correct its state.
+
+**Behaviour:**
+- Page size is fixed at 20 (PRD §9.3).
+- Results are ordered by user id ascending — a stable order independent of
+  any user-mutable field.
+- `plan` is the user's base persisted plan code (`FREE`, `BASIC`,
+  `PREMIUM`). The admin panel displays the base plan directly; the
+  effective-plan lapse projection is a user-side rendering concern and is
+  not exposed here.
+- `lastGeneratedAt` is the most recent `generated_at` across every
+  `user_reports` row for the user (archived or live), or `null` if the user
+  has never generated a report. Computed in a single grouped query against
+  the page's user ids — no N+1.
+- `deletionRequestedAt` is non-null only when the user has an in-flight
+  deletion request. The admin UI uses presence to render the "pending
+  deletion" indicator. Admins cannot cancel deletion requests; that is a
+  user-only action (PRD §9.3).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 42,
+        "email": "trader@example.com",
+        "name": "Jane Trader",
+        "plan": "PREMIUM",
+        "remainingReports": 14,
+        "active": true,
+        "hasEverPaid": true,
+        "deletionRequestedAt": null,
+        "lastGeneratedAt": "2026-05-17T08:00:00Z"
+      }
+    ],
+    "totalCount": 421,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 22
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `POST /admin/users/{userId}/top-up`
+
+Manual top-up performed by an admin. Always tied to a plan selection — there
+is no separate upgrade/downgrade action. Adds 20 reports with carry-over
+(`remaining + 20 = newTotal`), flips `has_ever_paid` on if not already set,
+and propagates the new plan to today's unarchived `user_reports` row if one
+exists (so a subsequent `GET /reports/today` call returns the upgraded plan
+response without regenerating).
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `userId` — numeric id of the target user.
+
+**Request body:**
+
+```json
+{
+  "plan": "PREMIUM"
+}
+```
+
+**Validation:**
+- `plan` — required, non-blank, max 16 characters. Must be `BASIC` or
+  `PREMIUM` (case-insensitive). `FREE` is not a valid top-up target.
+
+**Behaviour:**
+- The target user is looked up by id. A missing id returns
+  `404 USER_NOT_FOUND`.
+- Admin users cannot be targeted — the action returns
+  `403 CANNOT_MODIFY_ADMIN` so admins cannot accidentally tamper with one
+  another's subscription state.
+- The plan code is validated. `BASIC` and `PREMIUM` are the only accepted
+  values; anything else (including `FREE`) returns `400 INVALID_PLAN_FOR_TOP_UP`.
+- The user's `subscriptions` row is read; the response captures the
+  pre-mutation `oldPlan` and `oldRemaining` for the audit row.
+- `subscription.plan` is set to the target plan and `remaining_reports` is
+  incremented by 20 (the target plan's `report_count`).
+- `users.has_ever_paid` is set to `true` if not already — this is the same
+  flag the Phase 5B Midtrans confirmation flow flips; admin top-ups must
+  not leave it false.
+- If the user has an unarchived `user_reports` row whose
+  `forex_market_date` equals the current forex market date, its
+  `plan_at_generation` is updated to the new plan id. This makes the
+  upgraded plan label visible on the user's current-day report immediately
+  on next read; the row is still unarchived so this mutation is permitted.
+- One row is written to `subscription_audit_logs`. `action` is
+  `ADMIN_PLAN_CHANGE` when `oldPlan != newPlan`, otherwise `ADMIN_TOP_UP`.
+  All four old/new fields are populated; `performed_by` is the acting
+  admin's user id.
+- All four mutations (subscription row, user row, today-report row, audit
+  row) commit in a single transaction.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "userId": 42,
+    "plan": "PREMIUM",
+    "remainingReports": 27,
+    "hasEverPaid": true,
+    "planChanged": true
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `400 VALIDATION_FAILED` — request validation failed (e.g. missing `plan`).
+- `400 INVALID_PLAN_FOR_TOP_UP` — `plan` is not `BASIC` or `PREMIUM`.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `403 CANNOT_MODIFY_ADMIN` — target user holds the `ADMIN` role.
+- `404 USER_NOT_FOUND` — no user exists with the supplied id.
+- `404 NOT_FOUND` — the target user exists but has no subscription row. This
+  should not occur for a normally-provisioned account; documented for defence
+  in depth.
+
+### `POST /admin/users/{userId}/activate`
+
+Sets `users.is_active = true` for the target user. If the account is already
+active, the call is a no-op and no audit row is written. State transitions
+(inactive → active) write one row to `subscription_audit_logs` with
+`action = ADMIN_ACTIVATION`. Plan and remaining values are unchanged and the
+audit row carries `old_plan = new_plan` and `old_remaining = new_remaining`
+for both fields.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `userId` — numeric id of the target user.
+
+**Request body:** none
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "userId": 42,
+    "active": true
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `403 CANNOT_MODIFY_ADMIN` — target user holds the `ADMIN` role.
+- `404 USER_NOT_FOUND` — no user exists with the supplied id.
+
+### `POST /admin/users/{userId}/deactivate`
+
+Sets `users.is_active = false` for the target user. If the account is already
+inactive, the call is a no-op and no audit row is written. State transitions
+(active → inactive) write one row to `subscription_audit_logs` with
+`action = ADMIN_DEACTIVATION`. Plan and remaining values are unchanged and
+the audit row carries `old_plan = new_plan` and
+`old_remaining = new_remaining` for both fields.
+
+Deactivating an account does not invalidate any outstanding JWTs the user
+already holds — JWT invalidation is gated by token expiry only (P8). The
+user's next call to a route gated by `is_active` will be rejected when the
+relevant feature checks the flag. This phase introduces no such gate; the
+flag is currently consulted at login time only.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `userId` — numeric id of the target user.
+
+**Request body:** none
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "userId": 42,
+    "active": false
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `403 CANNOT_MODIFY_ADMIN` — target user holds the `ADMIN` role.
+- `404 USER_NOT_FOUND` — no user exists with the supplied id.
+
+### `GET /admin/usage`
+
+Returns a paginated list of report-generation events for the Admin Usage
+Overview page. Each row corresponds to one `user_reports` entry — archived
+or live — joined to its owning user for name + email rendering.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1`
+  are clamped to `1`.
+- `from` — optional, ISO-8601 date (`YYYY-MM-DD`). When set, filters to
+  rows whose `forex_market_date >= from`.
+- `to` — optional, ISO-8601 date (`YYYY-MM-DD`). When set, filters to
+  rows whose `forex_market_date <= to`.
+- `userId` — optional numeric id. When set, filters to rows belonging to
+  that user.
+
+**Validation:**
+- If both `from` and `to` are provided and `from > to`, the call returns
+  `400 INVALID_DATE_RANGE`.
+
+**Behaviour:**
+- Page size is fixed at 20 (PRD §9.3).
+- Results are ordered newest first: descending `forex_market_date`, then
+  descending `generated_at`, then descending `id` as a stable tiebreaker.
+- `planAtGeneration` is the plan code (`FREE` / `BASIC` / `PREMIUM`) frozen
+  on the row at generation time, not the user's current plan.
+- `countedAgainstLimit` reflects the row's persisted value — `false` only
+  when the report fell under the zero-content "markets consolidating" rule
+  (PRD §5.5). Archived and live rows are both included; the report-archive
+  flip at 22:00 UTC does not change the value.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "reportId": 314,
+        "userId": 42,
+        "userEmail": "trader@example.com",
+        "userName": "Jane Trader",
+        "forexMarketDate": "2026-05-17",
+        "planAtGeneration": "PREMIUM",
+        "countedAgainstLimit": true,
+        "generatedAt": "2026-05-17T08:00:00Z"
+      }
+    ],
+    "totalCount": 1834,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 92
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `400 INVALID_DATE_RANGE` — `from > to`.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
