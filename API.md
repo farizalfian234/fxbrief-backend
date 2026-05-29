@@ -880,18 +880,32 @@ each fetch cycle: subsequent callers in the same cycle reuse the existing
       "USD/CAD": 2.8,
       "NZD/USD": 1.4,
       "XAU/USD": 0.6
+    },
+    "preferenceMatches": {
+      "GBP/USD": true,
+      "EUR/USD": true,
+      "USD/JPY": false,
+      "AUD/USD": false,
+      "USD/CHF": false,
+      "USD/CAD": false,
+      "NZD/USD": false,
+      "XAU/USD": false
     }
   },
   "timestamp": "2026-05-17T08:00:00Z"
 }
 ```
 
-`preferenceSnapshot` and `finalDisplayScores` are present only when the
-generation applied a preference (override or persisted). When no
-preference applied, both are absent from the wire (per
-`@JsonInclude(NON_NULL)`). When `preferenceSnapshot` is present, the
-`payload.pairs` list (Premium) and `payload.bestPair` / `bestPairView`
-(Free/Basic) reflect the score-based reordering — see D-061.
+`preferenceSnapshot`, `finalDisplayScores`, and `preferenceMatches` are
+present only when the generation applied a preference (override or
+persisted). When no preference applied, all three are absent from the
+wire (per `@JsonInclude(NON_NULL)`). When `preferenceSnapshot` is
+present, the `payload.pairs` list (Premium) and `payload.bestPair` /
+`bestPairView` (Free/Basic) reflect the score-based reordering — see
+D-061. The `preferenceMatches` map flags each pair as `true` when its
+underlying `userCompatibilityScore` meets the match threshold (currently
+0.7), letting the frontend render a "matches your preference" badge
+without re-deriving the score itself (D-062).
 
 Each pair entry in Premium `payload.pairs` carries the same structure as the
 Phase 3A `PairAnalysis` record (multi-timeframe structure map, active zone,
@@ -950,6 +964,16 @@ High importance only.
       "USD/CAD": 2.8,
       "NZD/USD": 1.4,
       "XAU/USD": 0.6
+    },
+    "preferenceMatches": {
+      "GBP/USD": true,
+      "EUR/USD": true,
+      "USD/JPY": false,
+      "AUD/USD": false,
+      "USD/CHF": false,
+      "USD/CAD": false,
+      "NZD/USD": false,
+      "XAU/USD": false
     }
   },
   "timestamp": "2026-05-17T08:00:00Z"
@@ -1014,6 +1038,9 @@ exists. Does not trigger generation.
   the user saw at generation time is reproduced exactly, regardless of any
   subsequent change to the user's persisted preference (D-061). Both
   `preferenceSnapshot` and `finalDisplayScores` are returned on the response.
+  `preferenceMatches` is recomputed per read from the stored snapshot against
+  the deserialised payload — a future change to the match threshold applies
+  uniformly to all rows (D-062).
 - `reportsExhausted` is always `false` on this endpoint; the flag's meaning is
   "this call caused remaining to hit zero", which is generation-only.
 
@@ -1185,6 +1212,9 @@ omitted (no upsell affordance is exposed inside archived content per the
   order and `bestPair` reflect the preference active at generation time,
   never the user's current preference (D-061). Both `preferenceSnapshot`
   and `finalDisplayScores` are returned on the response.
+  `preferenceMatches` is recomputed per read from the stored snapshot
+  against the deserialised payload (D-062) — same logic as the live
+  read path, so a threshold change applies uniformly.
 - Narrowing is a pure read-time projection; the stored
   `market_analysis.payload` always contains the full Premium-depth content
   (engine always produces Premium-depth output, D-042) and is never
@@ -1237,6 +1267,16 @@ omitted (no upsell affordance is exposed inside archived content per the
       "USD/CAD": 2.8,
       "NZD/USD": 1.4,
       "XAU/USD": 0.6
+    },
+    "preferenceMatches": {
+      "GBP/USD": true,
+      "EUR/USD": true,
+      "USD/JPY": false,
+      "AUD/USD": false,
+      "USD/CHF": false,
+      "USD/CAD": false,
+      "NZD/USD": false,
+      "XAU/USD": false
     }
   },
   "timestamp": "2026-05-18T08:00:00Z"

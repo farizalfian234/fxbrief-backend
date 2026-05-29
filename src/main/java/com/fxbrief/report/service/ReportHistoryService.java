@@ -77,6 +77,7 @@ public class ReportHistoryService {
     private final ObjectMapper objectMapper;
     private final ReportPayloadNarrower payloadNarrower;
     private final PayloadReorderer payloadReorderer;
+    private final PreferenceScorer preferenceScorer;
 
     @Transactional(readOnly = true)
     public HistoryView getHistory(Long userId, int requestedPage) {
@@ -111,6 +112,14 @@ public class ReportHistoryService {
 
         PreferenceSnapshot snapshot = deserialiseSnapshot(report.getPreferenceSnapshot());
         Map<String, Double> scores = deserialiseScores(report.getFinalDisplayScores());
+        Map<String, Boolean> matches = null;
+        if (snapshot != null) {
+            // Same recomputed-on-read pattern as getTodayReport: matches are
+            // derived from the immutable snapshot against the freshly-
+            // deserialised payload (D-062). Threshold changes apply
+            // uniformly to live and archived reads.
+            matches = preferenceScorer.matches(fullPayload, snapshot);
+        }
         if (scores != null) {
             fullPayload = payloadReorderer.reorder(fullPayload, scores);
         }
@@ -129,7 +138,8 @@ public class ReportHistoryService {
                 subscription.remainingReports(),
                 false,
                 snapshot,
-                scores);
+                scores,
+                matches);
     }
 
     private HistoryView basicHistory(Long userId) {

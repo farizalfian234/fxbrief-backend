@@ -53,6 +53,15 @@ public class PreferenceScorer {
     private static final double USER_WEIGHT = 0.2;
 
     /**
+     * Threshold at or above which a pair's {@code userCompatibilityScore} is
+     * surfaced as a "preference match" on the wire (D-062). See that decision
+     * record for the rationale on choosing 0.7 specifically — short version:
+     * it requires the dominant criterion plus at least one secondary signal,
+     * filtering out pairs that tick only one box.
+     */
+    static final double MATCH_THRESHOLD = 0.7;
+
+    /**
      * Computes the final display score for every pair in the payload.
      *
      * @return ordered map of pair symbol → finalDisplayScore. Order
@@ -69,6 +78,35 @@ public class PreferenceScorer {
             double userScore = userCompatibilityScore(pair, snapshot);
             double finalScore = (marketScore * MARKET_WEIGHT) + (userScore * USER_WEIGHT);
             result.put(pair.pair(), finalScore);
+        }
+        return result;
+    }
+
+    /**
+     * Companion to {@link #score(ReportPayload, PreferenceSnapshot)}: returns
+     * a boolean per pair indicating whether the pair's
+     * {@code userCompatibilityScore} meets the {@link #MATCH_THRESHOLD}.
+     *
+     * <p>The match flag is derived from the same per-pair compatibility logic
+     * as the score map; it is not persisted (it is a pure function of the
+     * persisted {@code finalDisplayScores} plus each pair's
+     * {@code confidence.score} on the deserialised payload). Callers compute
+     * it at response-build time on both the generate and the read paths so a
+     * threshold change in the future produces consistent flags across
+     * archived and live reports.
+     *
+     * @return ordered map of pair symbol → match flag. Empty map when the
+     *         payload has no pairs or no snapshot was provided.
+     */
+    public Map<String, Boolean> matches(ReportPayload payload, PreferenceSnapshot snapshot) {
+        if (payload == null || payload.pairs() == null || snapshot == null) {
+            return Map.of();
+        }
+
+        Map<String, Boolean> result = new LinkedHashMap<>();
+        for (PairAnalysis pair : payload.pairs()) {
+            double userScore = userCompatibilityScore(pair, snapshot);
+            result.put(pair.pair(), userScore >= MATCH_THRESHOLD);
         }
         return result;
     }

@@ -90,8 +90,15 @@ public class ReportGenerationService {
         ReportPayload payload = analysis.payload();
 
         Map<String, Double> scores = null;
+        Map<String, Boolean> matches = null;
         if (snapshotOpt.isPresent()) {
             scores = preferenceScorer.score(payload, snapshotOpt.get());
+            // Matches must be derived from the SAME payload as scores —
+            // before reorder so each pair's snapshot-based compatibility
+            // is correctly evaluated. The reorder itself doesn't change
+            // per-pair properties; either order is fine, but doing it
+            // before keeps the read-path and write-path code symmetric.
+            matches = preferenceScorer.matches(payload, snapshotOpt.get());
             payload = payloadReorderer.reorder(payload, scores);
         }
 
@@ -101,7 +108,7 @@ public class ReportGenerationService {
 
         return toView(result.report(), payload,
                 result.remainingReports(), result.reportsExhausted(),
-                snapshotOpt.orElse(null), scores);
+                snapshotOpt.orElse(null), scores, matches);
     }
 
     @Transactional(readOnly = true)
@@ -127,18 +134,28 @@ public class ReportGenerationService {
         // preference. Once a report is generated, its view is frozen.
         PreferenceSnapshot snapshot = deserialiseSnapshot(report.getPreferenceSnapshot());
         Map<String, Double> scores = deserialiseScores(report.getFinalDisplayScores());
+        Map<String, Boolean> matches = null;
+        if (snapshot != null) {
+            // Derive matches from the stored snapshot against the freshly-
+            // deserialised payload. Not persisted — recomputed on every read
+            // so a future threshold tweak applies uniformly to all rows
+            // (D-062). The snapshot itself is frozen, so the per-pair user
+            // score is deterministic.
+            matches = preferenceScorer.matches(payload, snapshot);
+        }
         if (scores != null) {
             payload = payloadReorderer.reorder(payload, scores);
         }
 
         return Optional.of(toView(report, payload,
                 subscription.getRemainingReports(), false,
-                snapshot, scores));
+                snapshot, scores, matches));
     }
 
     private ReportView toView(UserReport report, ReportPayload payload,
                               int remainingReports, boolean reportsExhausted,
-                              PreferenceSnapshot snapshot, Map<String, Double> scores) {
+                              PreferenceSnapshot snapshot, Map<String, Double> scores,
+                              Map<String, Boolean> matches) {
         Object narrowedPayload = payloadNarrower.narrowForLive(
                 payload, report.getPlanAtGeneration());
 
@@ -153,7 +170,8 @@ public class ReportGenerationService {
                 remainingReports,
                 reportsExhausted,
                 snapshot,
-                scores);
+                scores,
+                matches);
     }
 
     private ReportPayload deserialisePayload(String payloadJson) {

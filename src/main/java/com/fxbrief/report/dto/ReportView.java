@@ -25,7 +25,7 @@ import java.util.Map;
  * whichever projection the narrower returned. See D-055 for the security
  * rationale.
  *
- * <h2>Preference fields (Addition 3, D-056)</h2>
+ * <h2>Preference fields (Addition 3, D-056, D-062)</h2>
  * {@code preferenceSnapshot} and {@code finalDisplayScores} are both
  * {@code @JsonInclude(NON_NULL)} on the record level so generations
  * without an active preference omit them from the wire entirely. When
@@ -38,6 +38,10 @@ import java.util.Map;
  *       before being passed into the narrower — the map is exposed for
  *       transparency and frontend tooltips, not used by the frontend
  *       for ordering.</li>
+ *   <li>{@code preferenceMatches} carries a per-pair boolean indicating
+ *       whether each pair's {@code userCompatibilityScore} meets the
+ *       match threshold (D-062). Derived at response-build time from
+ *       the snapshot and the deserialised payload; not persisted.</li>
  * </ul>
  *
  * <h2>Field meanings</h2>
@@ -58,5 +62,6 @@ public record ReportView(
         int remainingReports,
         boolean reportsExhausted,
         PreferenceSnapshot preferenceSnapshot,
-        Map<String, Double> finalDisplayScores
+        Map<String, Double> finalDisplayScores,
+        Map<String, Boolean> preferenceMatches
 ) {}
