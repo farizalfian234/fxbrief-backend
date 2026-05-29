@@ -1,18 +1,21 @@
 package com.fxbrief.report.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.analysis.dto.ReportPayload;
 import com.fxbrief.analysis.entity.MarketAnalysis;
 import com.fxbrief.analysis.service.AnalysisEngine;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.report.dto.GenerateReportRequest;
+import com.fxbrief.report.dto.PreferenceSnapshot;
 import com.fxbrief.report.dto.ReportView;
 import com.fxbrief.report.entity.UserReport;
 import com.fxbrief.report.repository.UserReportRepository;
+import com.fxbrief.subscription.entity.PlanCode;
 import com.fxbrief.subscription.entity.Subscription;
 import com.fxbrief.subscription.repository.SubscriptionRepository;
-import com.fxbrief.subscription.entity.PlanCode;
 import com.fxbrief.subscription.service.ForexMarketClock;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -21,6 +24,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDate;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -36,16 +40,31 @@ import java.util.Optional;
  *   <li>{@link UserReportWriter#commit} — advisory lock, decrement, write.</li>
  * </ol>
  *
- * Both the generate response and the today-read pass through
+ * <h2>Preference scoring (Addition 3, D-056)</h2>
+ * After the engine returns and before the writer commits, this service
+ * resolves the active preference (override or persisted), invokes
+ * {@link PreferenceScorer} to produce per-pair {@code finalDisplayScores},
+ * and uses {@link PayloadReorderer} to reorder the {@link ReportPayload}
+ * so the highest-scored pair is the new {@code bestPair} and the pairs
+ * list runs best-first by final score.
+ *
+ * The shared {@code market_analysis.payload} JSONB is never modified —
+ * reordering produces a new {@code ReportPayload} record that lives only
+ * in this request. The snapshot + score map are persisted on the
+ * user-specific {@code user_reports} row so subsequent reads of this
+ * report (today / archived) reproduce the same view deterministically,
+ * even if the user's persisted preference changes later.
+ *
+ * <p>Both the generate response and the today-read pass through
  * {@link ReportPayloadNarrower#narrowForLive} so Free and Basic users
- * receive only the data their UI renders (D-055). The stored
- * {@code market_analysis.payload} is never mutated — narrowing is purely
- * a read-time projection over the deserialised structure.
+ * receive only the data their UI renders (D-055).
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class ReportGenerationService {
+
+    private static final TypeReference<Map<String, Double>> SCORE_MAP_TYPE = new TypeReference<>() {};
 
     private final ReportGenerationPreCheck preCheck;
     private final UserReportWriter userReportWriter;
@@ -55,18 +74,34 @@ public class ReportGenerationService {
     private final ForexMarketClock forexMarketClock;
     private final ObjectMapper objectMapper;
     private final ReportPayloadNarrower payloadNarrower;
+    private final PreferenceResolver preferenceResolver;
+    private final PreferenceScorer preferenceScorer;
+    private final PayloadReorderer payloadReorderer;
 
-    public ReportView generate(Long userId) {
+    public ReportView generate(Long userId, GenerateReportRequest request) {
         LocalDate forexDate = forexMarketClock.currentForexMarketDate();
         preCheck.verify(userId, forexDate);
 
+        // Resolve preference before running the engine so a partial-override
+        // 400 is returned without paying the Claude cost.
+        Optional<PreferenceSnapshot> snapshotOpt = preferenceResolver.resolve(userId, request);
+
         AnalysisEngine.AnalysisResult analysis = analysisEngine.runAnalysis();
+        ReportPayload payload = analysis.payload();
+
+        Map<String, Double> scores = null;
+        if (snapshotOpt.isPresent()) {
+            scores = preferenceScorer.score(payload, snapshotOpt.get());
+            payload = payloadReorderer.reorder(payload, scores);
+        }
 
         UserReportWriter.CommitResult result = userReportWriter.commit(
-                userId, forexDate, analysis.row(), analysis.payload());
+                userId, forexDate, analysis.row(), payload,
+                snapshotOpt.orElse(null), scores);
 
-        return toView(result.report(), analysis.payload(),
-                result.remainingReports(), result.reportsExhausted());
+        return toView(result.report(), payload,
+                result.remainingReports(), result.reportsExhausted(),
+                snapshotOpt.orElse(null), scores);
     }
 
     @Transactional(readOnly = true)
@@ -86,14 +121,24 @@ public class ReportGenerationService {
 
         UserReport report = existing.get();
         MarketAnalysis row = report.getMarketAnalysis();
-        ReportPayload payload = deserialise(row.getPayload());
+        ReportPayload payload = deserialisePayload(row.getPayload());
+
+        // Apply the report's stored snapshot — never the user's current
+        // preference. Once a report is generated, its view is frozen.
+        PreferenceSnapshot snapshot = deserialiseSnapshot(report.getPreferenceSnapshot());
+        Map<String, Double> scores = deserialiseScores(report.getFinalDisplayScores());
+        if (scores != null) {
+            payload = payloadReorderer.reorder(payload, scores);
+        }
 
         return Optional.of(toView(report, payload,
-                subscription.getRemainingReports(), false));
+                subscription.getRemainingReports(), false,
+                snapshot, scores));
     }
 
     private ReportView toView(UserReport report, ReportPayload payload,
-                              int remainingReports, boolean reportsExhausted) {
+                              int remainingReports, boolean reportsExhausted,
+                              PreferenceSnapshot snapshot, Map<String, Double> scores) {
         Object narrowedPayload = payloadNarrower.narrowForLive(
                 payload, report.getPlanAtGeneration());
 
@@ -106,10 +151,12 @@ public class ReportGenerationService {
                 planCodeFor(report.getPlanAtGeneration()),
                 report.isCountedAgainstLimit(),
                 remainingReports,
-                reportsExhausted);
+                reportsExhausted,
+                snapshot,
+                scores);
     }
 
-    private ReportPayload deserialise(String payloadJson) {
+    private ReportPayload deserialisePayload(String payloadJson) {
         try {
             return objectMapper.readValue(payloadJson, ReportPayload.class);
         } catch (JsonProcessingException e) {
@@ -118,6 +165,30 @@ public class ReportGenerationService {
                     ErrorCodes.INTERNAL_ERROR,
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Stored report payload is unreadable");
+        }
+    }
+
+    private PreferenceSnapshot deserialiseSnapshot(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, PreferenceSnapshot.class);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to deserialise stored preferenceSnapshot: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Map<String, Double> deserialiseScores(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, SCORE_MAP_TYPE);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to deserialise stored finalDisplayScores: {}", e.getMessage());
+            return null;
         }
     }
 

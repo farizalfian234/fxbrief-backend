@@ -1,9 +1,12 @@
 package com.fxbrief.report.service;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.analysis.dto.ReportPayload;
 import com.fxbrief.analysis.entity.MarketAnalysis;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.report.dto.PreferenceSnapshot;
 import com.fxbrief.report.entity.UserReport;
 import com.fxbrief.report.repository.UserReportRepository;
 import com.fxbrief.subscription.entity.Subscription;
@@ -22,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.Map;
 
 /**
  * Persistence boundary for {@code user_reports} plus the linked
@@ -35,6 +39,12 @@ import java.time.LocalDate;
  * decrement, the usage write, and the report write to the same
  * transaction-scoped lock so a concurrent double-tap from the same user
  * serialises here even after the analysis engine has produced output.
+ *
+ * <p>Addition 3 (D-056): when {@code preferenceSnapshot} is non-null the
+ * writer serialises both the snapshot and {@code finalDisplayScores} to
+ * JSONB and stores them on the row alongside the existing columns. The
+ * computation happens upstream in {@code ReportGenerationService}; this
+ * writer only persists.
  */
 @Slf4j
 @Component
@@ -46,12 +56,25 @@ public class UserReportWriter {
     private final UserReportRepository userReportRepository;
     private final AdvisoryLockService advisoryLockService;
     private final EntityManager entityManager;
+    private final ObjectMapper objectMapper;
 
-    public record CommitResult(UserReport report, int remainingReports, boolean reportsExhausted) {}
+    public record CommitResult(
+            UserReport report,
+            int remainingReports,
+            boolean reportsExhausted) {}
 
+    /**
+     * @param preferenceSnapshot the resolved preference active at generation
+     *        time, or {@code null} when no preference applied. When non-null,
+     *        {@code finalDisplayScores} must also be non-null.
+     * @param finalDisplayScores the per-pair score map produced by
+     *        {@code PreferenceScorer}, or {@code null} when no preference applied.
+     */
     @Transactional
     public CommitResult commit(Long userId, LocalDate forexDate, MarketAnalysis marketAnalysisRef,
-                               ReportPayload payload) {
+                               ReportPayload payload,
+                               PreferenceSnapshot preferenceSnapshot,
+                               Map<String, Double> finalDisplayScores) {
         advisoryLockService.lockUser(userId);
 
         Subscription subscription = subscriptionRepository.findByUserId(userId)
@@ -119,6 +142,16 @@ public class UserReportWriter {
         report.setPlanAtGeneration(basePlan.getId());
         report.setGeneratedAt(Instant.now());
         report.setArchived(false);
+
+        if (preferenceSnapshot != null) {
+            report.setPreferenceSnapshot(serialise(preferenceSnapshot, "preferenceSnapshot"));
+            // finalDisplayScores must be present whenever the snapshot is — enforced
+            // by the contract of ReportGenerationService which always computes both
+            // together.
+            report.setFinalDisplayScores(
+                    serialise(finalDisplayScores, "finalDisplayScores"));
+        }
+
         try {
             userReportRepository.saveAndFlush(report);
         } catch (DataIntegrityViolationException e) {
@@ -130,9 +163,25 @@ public class UserReportWriter {
 
         int remaining = subscription.getRemainingReports();
         boolean exhausted = hasContent && remaining == 0;
-        log.info("Generated report id={} user={} counted={} remaining={} exhausted={}",
-                report.getId(), userId, hasContent, remaining, exhausted);
+        log.info("Generated report id={} user={} counted={} remaining={} exhausted={} preference={}",
+                report.getId(), userId, hasContent, remaining, exhausted,
+                preferenceSnapshot == null ? "none" : preferenceSnapshot.preferenceType());
 
         return new CommitResult(report, remaining, exhausted);
+    }
+
+    private String serialise(Object value, String fieldName) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return objectMapper.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to serialise {}: {}", fieldName, e.getMessage());
+            throw new DomainException(
+                    ErrorCodes.INTERNAL_ERROR,
+                    HttpStatus.INTERNAL_SERVER_ERROR,
+                    "Failed to serialise " + fieldName);
+        }
     }
 }

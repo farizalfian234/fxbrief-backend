@@ -747,7 +747,35 @@ response shape is narrowed at the backend by the row's frozen
 
 **Authentication:** required (Bearer JWT)
 
-**Request body:** none
+**Request body:** optional. When present, supports a one-time preference
+override (D-061):
+
+```json
+{
+  "preferenceType": "TRADING_STYLE",
+  "preferenceValue": "SWING_TRADER"
+}
+```
+
+Both `preferenceType` and `preferenceValue` must be provided together. When
+one is omitted or blank, the endpoint returns `400 VALIDATION_FAILED`.
+When the body is absent entirely (or both fields are null), the user's
+persisted `user_preferences` row is used; if no row exists, no
+compatibility scoring is applied.
+
+Valid `preferenceType` values: `TRADING_STYLE`, `PREFERRED_SESSION`,
+`RISK_PROFILE`, `FAVORITE_PAIR`. Valid `preferenceValue` values per type:
+
+| `preferenceType`     | Valid `preferenceValue`                                    |
+|----------------------|------------------------------------------------------------|
+| `TRADING_STYLE`      | `SCALPER`, `INTRADAY`, `SWING_TRADER`, `POSITION_TRADER`  |
+| `PREFERRED_SESSION`  | `ASIAN`, `LONDON`, `NEW_YORK`                              |
+| `RISK_PROFILE`       | `CONSERVATIVE`, `BALANCED`, `AGGRESSIVE`                   |
+| `FAVORITE_PAIR`      | any supported pair symbol (e.g. `EUR/USD`)                |
+
+An override does **not** update the user's persisted preference — it
+applies for this generation only. The override is what lands in the
+resulting row's `preferenceSnapshot`.
 
 **Behaviour:**
 
@@ -762,12 +790,20 @@ The request is processed in three phases.
      date → `409 DAILY_LIMIT_REACHED`;
    - the subscription's `remaining_reports` is zero or negative →
      `409 NO_REMAINING_REPORTS`.
+   The pre-check also resolves the active preference (override → persisted →
+   none) and validates it; an invalid override returns `400 VALIDATION_FAILED`
+   without consuming a report credit.
 2. **Analysis.** The analysis engine resolves the current `fetch_id`. If a
    `market_analysis` row already exists for that id, its stored payload is returned
    without any Claude API call. Otherwise the full SMC pipeline runs, narratives
    are generated via the mega-call (with per-pair fallback per DECISIONS D-045), a
    short one-line summary is composed from the payload, and the row is persisted.
    See PRD §11.3 and DECISIONS D-044 for the shared-analysis contract.
+   When a preference is active, `PreferenceScorer` computes the per-pair
+   `finalDisplayScore` map from the deserialised payload, `PayloadReorderer`
+   produces a new `ReportPayload` whose `pairs` list is best-first by score and
+   whose `bestPair` is the top-scored pair. The shared `market_analysis.payload`
+   JSONB is never modified — reordering is a per-request projection only (D-061).
 3. **Commit (advisory-locked transaction).** A Postgres transaction-scoped advisory
    lock keyed on `user_id` serialises concurrent double-taps from the same user.
    The pre-check invariants are re-verified under the lock. If the payload's
@@ -830,11 +866,32 @@ each fetch cycle: subsequent callers in the same cycle reuse the existing
     "planAtGeneration": "PREMIUM",
     "countedAgainstLimit": true,
     "remainingReports": 19,
-    "reportsExhausted": false
+    "reportsExhausted": false,
+    "preferenceSnapshot": {
+      "preferenceType": "TRADING_STYLE",
+      "preferenceValue": "SWING_TRADER"
+    },
+    "finalDisplayScores": {
+      "GBP/USD": 8.4,
+      "EUR/USD": 6.6,
+      "USD/JPY": 5.2,
+      "AUD/USD": 4.0,
+      "USD/CHF": 3.8,
+      "USD/CAD": 2.8,
+      "NZD/USD": 1.4,
+      "XAU/USD": 0.6
+    }
   },
   "timestamp": "2026-05-17T08:00:00Z"
 }
 ```
+
+`preferenceSnapshot` and `finalDisplayScores` are present only when the
+generation applied a preference (override or persisted). When no
+preference applied, both are absent from the wire (per
+`@JsonInclude(NON_NULL)`). When `preferenceSnapshot` is present, the
+`payload.pairs` list (Premium) and `payload.bestPair` / `bestPairView`
+(Free/Basic) reflect the score-based reordering — see D-061.
 
 Each pair entry in Premium `payload.pairs` carries the same structure as the
 Phase 3A `PairAnalysis` record (multi-timeframe structure map, active zone,
@@ -879,7 +936,21 @@ High importance only.
     "planAtGeneration": "BASIC",
     "countedAgainstLimit": true,
     "remainingReports": 4,
-    "reportsExhausted": false
+    "reportsExhausted": false,
+    "preferenceSnapshot": {
+      "preferenceType": "TRADING_STYLE",
+      "preferenceValue": "SWING_TRADER"
+    },
+    "finalDisplayScores": {
+      "GBP/USD": 8.4,
+      "EUR/USD": 6.6,
+      "USD/JPY": 5.2,
+      "AUD/USD": 4.0,
+      "USD/CHF": 3.8,
+      "USD/CAD": 2.8,
+      "NZD/USD": 1.4,
+      "XAU/USD": 0.6
+    }
   },
   "timestamp": "2026-05-17T08:00:00Z"
 }
@@ -902,6 +973,8 @@ The "markets consolidating" case for Free/Basic carries
 `marketsConsolidating: true` alone.
 
 **Errors:**
+- `400 VALIDATION_FAILED` — invalid preference override (partial fields, unknown
+  type or value, or pair symbol not in the supported set).
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
 - `403 ACCOUNT_INACTIVE` — authenticated user is not active.
 - `404 NOT_FOUND` — no subscription exists for the authenticated user.
@@ -936,6 +1009,11 @@ exists. Does not trigger generation.
   `bestPairView` + three `compactPreviews`. The current `remaining_reports` value
   from the subscription is included for dashboard convenience — it reflects the
   live counter, not a frozen value.
+- When the row carries a `preference_snapshot`, the deserialised payload is first
+  reordered by the row's stored `final_display_scores` so the same pair ordering
+  the user saw at generation time is reproduced exactly, regardless of any
+  subsequent change to the user's persisted preference (D-061). Both
+  `preferenceSnapshot` and `finalDisplayScores` are returned on the response.
 - `reportsExhausted` is always `false` on this endpoint; the flag's meaning is
   "this call caused remaining to hit zero", which is generation-only.
 
@@ -1013,7 +1091,11 @@ visibility immediately.
         "reportId": 314,
         "forexMarketDate": "2026-05-17",
         "planAtGeneration": "PREMIUM",
-        "summary": "3 setups available — GBP/USD best opportunity"
+        "summary": "3 setups available — GBP/USD best opportunity",
+        "preferenceSnapshot": {
+          "preferenceType": "TRADING_STYLE",
+          "preferenceValue": "SWING_TRADER"
+        }
       },
       {
         "reportId": 305,
@@ -1030,6 +1112,12 @@ visibility immediately.
   "timestamp": "2026-05-18T08:00:00Z"
 }
 ```
+
+Each item carries `preferenceSnapshot` only when a preference was active
+at generation time — rows generated without a preference omit the field
+entirely (per `@JsonInclude(NON_NULL)`). The snapshot is frozen at write
+time and never changes; a user who later changes their persisted
+preference still sees the original value in history (D-061).
 
 **Success response (200) — Free or lapsed:**
 
@@ -1092,6 +1180,11 @@ omitted (no upsell affordance is exposed inside archived content per the
     (consolidating-markets case), both `bestPairView` and
     `compactPreviews` are absent and the frontend renders from
     `marketsConsolidating: true` alone.
+- When the row carries a `preference_snapshot`, the deserialised payload
+  is first reordered by the row's stored `final_display_scores` so the
+  order and `bestPair` reflect the preference active at generation time,
+  never the user's current preference (D-061). Both `preferenceSnapshot`
+  and `finalDisplayScores` are returned on the response.
 - Narrowing is a pure read-time projection; the stored
   `market_analysis.payload` always contains the full Premium-depth content
   (engine always produces Premium-depth output, D-042) and is never
@@ -1130,7 +1223,21 @@ omitted (no upsell affordance is exposed inside archived content per the
     "planAtGeneration": "BASIC",
     "countedAgainstLimit": true,
     "remainingReports": 12,
-    "reportsExhausted": false
+    "reportsExhausted": false,
+    "preferenceSnapshot": {
+      "preferenceType": "TRADING_STYLE",
+      "preferenceValue": "SWING_TRADER"
+    },
+    "finalDisplayScores": {
+      "GBP/USD": 8.4,
+      "EUR/USD": 6.6,
+      "USD/JPY": 5.2,
+      "AUD/USD": 4.0,
+      "USD/CHF": 3.8,
+      "USD/CAD": 2.8,
+      "NZD/USD": 1.4,
+      "XAU/USD": 0.6
+    }
   },
   "timestamp": "2026-05-18T08:00:00Z"
 }

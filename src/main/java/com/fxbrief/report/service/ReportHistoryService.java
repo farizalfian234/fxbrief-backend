@@ -1,6 +1,7 @@
 package com.fxbrief.report.service;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.analysis.dto.ReportPayload;
 import com.fxbrief.analysis.entity.MarketAnalysis;
@@ -8,6 +9,7 @@ import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
 import com.fxbrief.report.dto.HistoryItemView;
 import com.fxbrief.report.dto.HistoryView;
+import com.fxbrief.report.dto.PreferenceSnapshot;
 import com.fxbrief.report.dto.ReportView;
 import com.fxbrief.report.entity.UserReport;
 import com.fxbrief.report.repository.UserReportRepository;
@@ -26,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Read surface for archived reports.
@@ -41,6 +44,14 @@ import java.util.List;
  * generated is rendered at Basic depth forever, even after the user upgrades.
  * This preserves the immutability rule (PRD §8.1, D-054).
  *
+ * <h2>Preference snapshot (Addition 3, D-056)</h2>
+ * Every read of an archived row applies its stored
+ * {@code final_display_scores} via {@link PayloadReorderer} before
+ * narrowing. The order and best-pair pointer reflect the preference active
+ * when the report was generated, never the user's current preference. A
+ * user who changes their persisted preference later sees no change in
+ * historical reports.
+ *
  * <h2>Narrowing</h2>
  * The narrowing call uses {@code narrowForArchived} rather than
  * {@code narrowForLive} — archived responses carry the {@code bestPairView}
@@ -49,7 +60,7 @@ import java.util.List;
  * archived report content (D-055).
  *
  * The stored {@code market_analysis.payload} JSONB is never mutated; the
- * narrowing is a pure read-time projection.
+ * narrowing and reordering are pure read-time projections.
  */
 @Slf4j
 @Service
@@ -59,10 +70,13 @@ public class ReportHistoryService {
     static final int BASIC_VISIBLE_LIMIT = 10;
     static final int PREMIUM_PAGE_SIZE = 10;
 
+    private static final TypeReference<Map<String, Double>> SCORE_MAP_TYPE = new TypeReference<>() {};
+
     private final UserReportRepository userReportRepository;
     private final SubscriptionService subscriptionService;
     private final ObjectMapper objectMapper;
     private final ReportPayloadNarrower payloadNarrower;
+    private final PayloadReorderer payloadReorderer;
 
     @Transactional(readOnly = true)
     public HistoryView getHistory(Long userId, int requestedPage) {
@@ -93,7 +107,14 @@ public class ReportHistoryService {
                 .orElseThrow(this::notFound);
 
         MarketAnalysis row = report.getMarketAnalysis();
-        ReportPayload fullPayload = deserialise(row.getPayload());
+        ReportPayload fullPayload = deserialisePayload(row.getPayload());
+
+        PreferenceSnapshot snapshot = deserialiseSnapshot(report.getPreferenceSnapshot());
+        Map<String, Double> scores = deserialiseScores(report.getFinalDisplayScores());
+        if (scores != null) {
+            fullPayload = payloadReorderer.reorder(fullPayload, scores);
+        }
+
         Object visiblePayload = payloadNarrower.narrowForArchived(
                 fullPayload, report.getPlanAtGeneration());
 
@@ -106,7 +127,9 @@ public class ReportHistoryService {
                 planCodeFor(report.getPlanAtGeneration()),
                 report.isCountedAgainstLimit(),
                 subscription.remainingReports(),
-                false);
+                false,
+                snapshot,
+                scores);
     }
 
     private HistoryView basicHistory(Long userId) {
@@ -151,7 +174,8 @@ public class ReportHistoryService {
                 report.getId(),
                 report.getForexMarketDate(),
                 planCodeFor(report.getPlanAtGeneration()),
-                report.getSummary());
+                report.getSummary(),
+                deserialiseSnapshot(report.getPreferenceSnapshot()));
     }
 
     private boolean isFreeEffective(PlanView plan) {
@@ -171,7 +195,7 @@ public class ReportHistoryService {
         return String.valueOf(planId);
     }
 
-    private ReportPayload deserialise(String payloadJson) {
+    private ReportPayload deserialisePayload(String payloadJson) {
         try {
             return objectMapper.readValue(payloadJson, ReportPayload.class);
         } catch (JsonProcessingException e) {
@@ -180,6 +204,30 @@ public class ReportHistoryService {
                     ErrorCodes.INTERNAL_ERROR,
                     HttpStatus.INTERNAL_SERVER_ERROR,
                     "Stored report payload is unreadable");
+        }
+    }
+
+    private PreferenceSnapshot deserialiseSnapshot(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, PreferenceSnapshot.class);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to deserialise stored preferenceSnapshot: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private Map<String, Double> deserialiseScores(String json) {
+        if (json == null) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, SCORE_MAP_TYPE);
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to deserialise stored finalDisplayScores: {}", e.getMessage());
+            return null;
         }
     }
 

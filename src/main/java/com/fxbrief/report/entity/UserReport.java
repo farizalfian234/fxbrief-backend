@@ -15,6 +15,8 @@ import lombok.AccessLevel;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
+import org.hibernate.annotations.JdbcTypeCode;
+import org.hibernate.type.SqlTypes;
 
 import java.time.Instant;
 import java.time.LocalDate;
@@ -25,6 +27,12 @@ import java.time.LocalDate;
  * duplication. Once archived, the row is immutable; plan_at_generation
  * is the badge frozen at write time so a later upgrade does not
  * retroactively change historical displays.
+ *
+ * <p>Addition 3 adds {@code preferenceSnapshot} and {@code finalDisplayScores}
+ * — both nullable JSONB columns. When the user generated this report with
+ * an active preference (override or persisted), both fields are populated
+ * and immutable thereafter. Changing {@code user_preferences} later never
+ * rewrites these. See DECISIONS D-056.
  */
 @Entity
 @Table(name = "user_reports")
@@ -65,4 +73,12 @@ public class UserReport {
 
     @Column(name = "archived_at")
     private Instant archivedAt;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "preference_snapshot", columnDefinition = "jsonb")
+    private String preferenceSnapshot;
+
+    @JdbcTypeCode(SqlTypes.JSON)
+    @Column(name = "final_display_scores", columnDefinition = "jsonb")
+    private String finalDisplayScores;
 }
