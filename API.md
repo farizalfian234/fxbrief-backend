@@ -77,6 +77,11 @@ native actuator response shape.
 | `WEEKLY_SUMMARY_NOT_FOUND`    | 404  | Weekly summary id (admin) or published slug (public) does not exist. Introduced in Phase 4C. |
 | `INVALID_WEEKLY_SUMMARY_STATUS` | 400 | A status value supplied to the admin list filter or update is not one of `DRAFT`, `PUBLISHED`, `ARCHIVED`. Introduced in Phase 4C. |
 | `WEEKLY_SUMMARY_NOT_PUBLISHABLE` | 409 | Publish was attempted on a summary with no admin content. Introduced in Phase 4C. |
+| `ARTICLE_NOT_FOUND`           | 404  | Article id (admin) or published slug (public) does not exist. Introduced in Phase 4D. |
+| `INVALID_ARTICLE_STATUS`      | 400  | A status value supplied to the admin list filter, create, or update is not one of `DRAFT`, `SCHEDULED`, `PUBLISHED`, `ARCHIVED`. Introduced in Phase 4D. |
+| `INVALID_ARTICLE_CATEGORY`    | 400  | A category value supplied to a filter, create, or update is not one of the six article categories. Introduced in Phase 4D. |
+| `ARTICLE_SLUG_CONFLICT`       | 409  | The resolved slug already belongs to another article. Introduced in Phase 4D. |
+| `ARTICLE_DELETE_NOT_ALLOWED`  | 400  | Hard delete attempted on an article that is not in `DRAFT` status. Introduced in Phase 4D. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -2404,3 +2409,397 @@ generate `sitemap.xml`.
 ```
 
 **Errors:** none beyond the standard envelope; an empty registry returns `[]`.
+
+## Articles (Phase 4D)
+
+The article system is admin-managed Markdown content with a public read surface.
+Admin endpoints are under `/admin/articles` (role `ADMIN`); public endpoints are
+under `/public/articles` (no auth). Content is stored as Markdown and returned
+verbatim — rendering is the frontend's responsibility. Reading time is
+auto-calculated at save time at 200 words per minute. Slugs are URL-safe,
+lowercase, hyphenated, and unique; an explicit slug may be supplied, otherwise
+one is derived from the title.
+
+Article categories: `WEEKLY_RECAP`, `EDUCATIONAL`, `FOREX_BASICS`,
+`MACRO_INSIGHTS`, `PLATFORM_UPDATES`, `TRADING_PSYCHOLOGY`.
+
+Article statuses: `DRAFT`, `SCHEDULED`, `PUBLISHED`, `ARCHIVED`.
+
+### `GET /admin/articles`
+
+Paginated list of articles for the admin authoring page.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1` are
+  clamped to `1`.
+- `status` — optional. Filters to one status; must be one of `DRAFT`,
+  `SCHEDULED`, `PUBLISHED`, `ARCHIVED` (case-insensitive). Absent means all.
+- `category` — optional. Filters to one category (case-insensitive). Absent
+  means all.
+
+**Behaviour:**
+- Page size is fixed at 20.
+- Ordered newest-created first (`created_at DESC`).
+- Each row carries the author display name (resolved from `users`), not
+  `author_id`. The full Markdown body is omitted from the list; fetch it via the
+  detail endpoint.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 12,
+        "title": "Understanding Order Blocks",
+        "slug": "understanding-order-blocks",
+        "excerpt": "A practical guide to identifying institutional order blocks...",
+        "category": "EDUCATIONAL",
+        "tags": ["smc", "order-blocks"],
+        "featuredImageUrl": "https://cdn.fxbrief.example/ob.png",
+        "readingTimeMinutes": 6,
+        "status": "DRAFT",
+        "scheduledPublishAt": null,
+        "publishedAt": null,
+        "authorName": "Jane Admin",
+        "createdAt": "2026-05-30T10:00:00Z",
+        "updatedAt": "2026-05-30T10:00:00Z"
+      }
+    ],
+    "totalCount": 1,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 1
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `400 INVALID_ARTICLE_STATUS` — unrecognised `status` filter value.
+- `400 INVALID_ARTICLE_CATEGORY` — unrecognised `category` filter value.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+
+### `GET /admin/articles/{id}`
+
+Full article for editing, including the Markdown body and SEO fields.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the article id.
+
+**Behaviour:** carries the author display name (from `users`), not `author_id`.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 12,
+    "title": "Understanding Order Blocks",
+    "slug": "understanding-order-blocks",
+    "content": "## What is an order block\n\n...",
+    "excerpt": "A practical guide to identifying institutional order blocks...",
+    "category": "EDUCATIONAL",
+    "tags": ["smc", "order-blocks"],
+    "featuredImageUrl": "https://cdn.fxbrief.example/ob.png",
+    "readingTimeMinutes": 6,
+    "seoTitle": "Understanding Order Blocks | FX–Brief",
+    "seoDescription": "Learn to identify institutional order blocks.",
+    "status": "DRAFT",
+    "scheduledPublishAt": null,
+    "publishedAt": null,
+    "authorName": "Jane Admin",
+    "createdAt": "2026-05-30T10:00:00Z",
+    "updatedAt": "2026-05-30T10:00:00Z"
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `404 ARTICLE_NOT_FOUND` — no article with the given id.
+
+### `POST /admin/articles`
+
+Creates an article. The authenticated admin becomes the author.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** required.
+
+```json
+{
+  "title": "Understanding Order Blocks",
+  "slug": "understanding-order-blocks",
+  "content": "## What is an order block\n\n...",
+  "excerpt": "A practical guide...",
+  "category": "EDUCATIONAL",
+  "tags": ["smc", "order-blocks"],
+  "featuredImageUrl": "https://cdn.fxbrief.example/ob.png",
+  "seoTitle": "Understanding Order Blocks | FX–Brief",
+  "seoDescription": "Learn to identify institutional order blocks.",
+  "scheduledPublishAt": null,
+  "status": "DRAFT"
+}
+```
+
+**Validation rules:**
+- `title` — required, non-blank, max 255.
+- `content` — required, non-blank.
+- `category` — required; must be one of the six article categories, else
+  `400 INVALID_ARTICLE_CATEGORY`.
+- `slug` — optional, max 255. When blank, derived from the title. The supplied
+  or derived value is normalised to a URL-safe lowercase hyphenated form and
+  must be unique, else `409 ARTICLE_SLUG_CONFLICT`.
+- `excerpt` — optional, max 500.
+- `tags` — optional array; each tag max 64. Blank tags are dropped; duplicates
+  removed. An empty result is stored as null.
+- `featuredImageUrl` — optional, max 500.
+- `seoTitle` — optional, max 255.
+- `seoDescription` — optional, max 500.
+- `scheduledPublishAt` — optional ISO-8601 instant.
+- `status` — optional; must be one of `DRAFT`, `SCHEDULED`, `PUBLISHED`,
+  `ARCHIVED` (case-insensitive), else `400 INVALID_ARTICLE_STATUS`. Defaults to
+  `DRAFT`.
+
+**Behaviour:**
+- `readingTimeMinutes` is auto-calculated from `content` at 200 words/minute
+  (minimum 1).
+- If `status` is `PUBLISHED`, `published_at` is stamped now, `scheduledPublishAt`
+  is cleared, and a sitemap entry for `/articles/{slug}` is upserted with
+  `change_freq = monthly`, `priority = 0.8`.
+- If `status` is `SCHEDULED`, the row is left for the scheduled-publish job;
+  set `scheduledPublishAt` accordingly.
+
+**Success response (200):** the full `AdminArticleDetailView` (same shape as
+`GET /admin/articles/{id}`).
+
+**Errors:**
+- `400 VALIDATION_FAILED` — missing/oversized fields.
+- `400 INVALID_ARTICLE_CATEGORY` — bad category.
+- `400 INVALID_ARTICLE_STATUS` — bad status.
+- `409 ARTICLE_SLUG_CONFLICT` — slug already in use.
+- `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+### `PUT /admin/articles/{id}`
+
+Updates any subset of fields. A `null` field is left unchanged.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the article id.
+
+**Request body:** any subset of the create fields. `title` and `content`, when
+present, must be non-blank. `slug`, when present and non-blank, is re-normalised
+and re-checked for uniqueness. `category` and `status`, when present, are
+validated against their enums.
+
+**Behaviour:**
+- Changing `content` recomputes `readingTimeMinutes`.
+- A `status` transition to `PUBLISHED` stamps `published_at`, clears
+  `scheduledPublishAt`, and upserts the sitemap entry (`monthly`/`0.8`); a
+  transition to `ARCHIVED` removes the sitemap entry. A `status` equal to the
+  current status is a no-op for the transition (other fields are still saved).
+- `POST .../publish` and `POST .../archive` are the dedicated equivalents.
+
+**Success response (200):** the full `AdminArticleDetailView` reflecting the
+saved state.
+
+**Errors:**
+- `400 VALIDATION_FAILED` — blank `title`/`content` or oversized field.
+- `400 INVALID_ARTICLE_CATEGORY` / `400 INVALID_ARTICLE_STATUS`.
+- `409 ARTICLE_SLUG_CONFLICT` — new slug already in use.
+- `404 ARTICLE_NOT_FOUND` — no article with the given id.
+- `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+### `POST /admin/articles/{id}/publish`
+
+Publishes an article: sets `status = PUBLISHED`, stamps `published_at = now`
+(overriding any `scheduledPublishAt`, which is cleared), and upserts the sitemap
+entry for `/articles/{slug}` (`change_freq = monthly`, `priority = 0.8`).
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none.
+
+**Success response (200):** the full `AdminArticleDetailView` with
+`status = "PUBLISHED"` and a populated `publishedAt`.
+
+**Errors:**
+- `404 ARTICLE_NOT_FOUND` — no article with the given id.
+- `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+### `POST /admin/articles/{id}/archive`
+
+Archives an article: sets `status = ARCHIVED` and removes its sitemap entry.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none.
+
+**Success response (200):** the full `AdminArticleDetailView` with
+`status = "ARCHIVED"`.
+
+**Errors:**
+- `404 ARTICLE_NOT_FOUND` — no article with the given id.
+- `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+### `DELETE /admin/articles/{id}`
+
+Hard-deletes an article. Permitted only when the article is in `DRAFT` status;
+a `PUBLISHED` or `ARCHIVED` (or `SCHEDULED`) article must be archived first. No
+`sitemap_entries` row exists for a `DRAFT` article, so no sitemap cleanup is
+needed.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": null,
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `400 ARTICLE_DELETE_NOT_ALLOWED` — article is not in `DRAFT` status.
+- `404 ARTICLE_NOT_FOUND` — no article with the given id.
+- `401 UNAUTHENTICATED` / `403 FORBIDDEN`.
+
+### `GET /public/articles`
+
+Paginated list of published articles.
+
+**Authentication:** none.
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Below `1` is clamped.
+- `category` — optional. Filters to one category (case-insensitive), else
+  `400 INVALID_ARTICLE_CATEGORY`.
+- `tag` — optional. Filters to articles whose `tags` contain the exact value.
+
+**Behaviour:**
+- Returns only `PUBLISHED` articles. Page size fixed at 20.
+- Ordered most-recently-published first (`published_at DESC`).
+- No author details are exposed.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 12,
+        "title": "Understanding Order Blocks",
+        "slug": "understanding-order-blocks",
+        "excerpt": "A practical guide...",
+        "category": "EDUCATIONAL",
+        "tags": ["smc", "order-blocks"],
+        "featuredImageUrl": "https://cdn.fxbrief.example/ob.png",
+        "readingTimeMinutes": 6,
+        "publishedAt": "2026-05-31T09:00:00Z"
+      }
+    ],
+    "totalCount": 1,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 1
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `400 INVALID_ARTICLE_CATEGORY` — unrecognised `category` filter value.
+
+### `GET /public/articles/categories`
+
+Lists the categories that have at least one published article, ordered
+alphabetically.
+
+**Authentication:** none.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": ["EDUCATIONAL", "MACRO_INSIGHTS"],
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:** none beyond the standard envelope; an empty set returns `[]`.
+
+### `GET /public/articles/{slug}`
+
+Full published article by slug.
+
+**Authentication:** none.
+
+**Path parameters:**
+- `slug` — the article slug.
+
+**Behaviour:**
+- Returns the full article minus author internal details.
+- A slug that exists but is not `PUBLISHED` returns `404` — the same response as
+  an unknown slug, so draft/scheduled/archived existence is not disclosed.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 12,
+    "title": "Understanding Order Blocks",
+    "slug": "understanding-order-blocks",
+    "content": "## What is an order block\n\n...",
+    "excerpt": "A practical guide...",
+    "category": "EDUCATIONAL",
+    "tags": ["smc", "order-blocks"],
+    "featuredImageUrl": "https://cdn.fxbrief.example/ob.png",
+    "readingTimeMinutes": 6,
+    "seoTitle": "Understanding Order Blocks | FX–Brief",
+    "seoDescription": "Learn to identify institutional order blocks.",
+    "publishedAt": "2026-05-31T09:00:00Z"
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `404 ARTICLE_NOT_FOUND` — no published article with the given slug.
+
+### Scheduled publishing
+
+A background job runs every 15 minutes
+(`fxbrief.scheduler.article-publish-cron`, default `0 0/15 * * * *`, UTC). It
+finds articles in `SCHEDULED` status whose `scheduled_publish_at` is at or
+before now and publishes each one — identical effect to
+`POST /admin/articles/{id}/publish` (status `PUBLISHED`, `published_at = now`,
+sitemap upsert with `monthly`/`0.8`). The job has no HTTP surface.
+
+### Sitemap note (articles)
+
+Publishing an article upserts a `sitemap_entries` row for `/articles/{slug}`
+with `change_freq = monthly` and `priority = 0.8`; archiving removes it. These
+rows are returned alongside weekly-recap rows by `GET /public/sitemap-entries`
+(documented above). The `sitemap_entries` table is unchanged from Phase 4C.

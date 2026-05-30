@@ -13,8 +13,13 @@ import java.util.List;
 
 /**
  * Maintains the public sitemap registry. Published content upserts a row keyed
- * by its public path; archived content removes it. Phase 4D reuses this for
- * articles.
+ * by its public path; archived content removes it.
+ *
+ * <p>Weekly recaps use the default {@code weekly}/{@code 0.7} freshness and
+ * priority; articles supply their own ({@code monthly}/{@code 0.8}) via the
+ * four-argument {@link #upsert(String, Instant, String, BigDecimal)} overload.
+ * On an existing row only {@code last_modified} is refreshed — the original
+ * {@code change_freq} and {@code priority} are preserved.
  */
 @Service
 @RequiredArgsConstructor
@@ -27,12 +32,17 @@ public class SitemapService {
 
     @Transactional
     public void upsert(String path, Instant lastModified) {
+        upsert(path, lastModified, DEFAULT_CHANGE_FREQ, DEFAULT_PRIORITY);
+    }
+
+    @Transactional
+    public void upsert(String path, Instant lastModified, String changeFreq, BigDecimal priority) {
         SitemapEntry entry = sitemapEntryRepository.findByPath(path)
                 .orElseGet(SitemapEntry::new);
         if (entry.getId() == null) {
             entry.setPath(path);
-            entry.setChangeFreq(DEFAULT_CHANGE_FREQ);
-            entry.setPriority(DEFAULT_PRIORITY);
+            entry.setChangeFreq(changeFreq);
+            entry.setPriority(priority);
         }
         entry.setLastModified(lastModified);
         sitemapEntryRepository.save(entry);

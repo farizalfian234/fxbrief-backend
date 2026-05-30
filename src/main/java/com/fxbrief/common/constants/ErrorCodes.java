@@ -43,5 +43,11 @@ public final class ErrorCodes {
     public static final String INVALID_WEEKLY_SUMMARY_STATUS = "INVALID_WEEKLY_SUMMARY_STATUS";
     public static final String WEEKLY_SUMMARY_NOT_PUBLISHABLE = "WEEKLY_SUMMARY_NOT_PUBLISHABLE";
 
+    public static final String ARTICLE_NOT_FOUND = "ARTICLE_NOT_FOUND";
+    public static final String INVALID_ARTICLE_STATUS = "INVALID_ARTICLE_STATUS";
+    public static final String INVALID_ARTICLE_CATEGORY = "INVALID_ARTICLE_CATEGORY";
+    public static final String ARTICLE_SLUG_CONFLICT = "ARTICLE_SLUG_CONFLICT";
+    public static final String ARTICLE_DELETE_NOT_ALLOWED = "ARTICLE_DELETE_NOT_ALLOWED";
+
     private ErrorCodes() {}
 }
