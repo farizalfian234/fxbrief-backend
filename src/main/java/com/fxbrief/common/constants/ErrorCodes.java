@@ -36,5 +36,8 @@ public final class ErrorCodes {
     public static final String CANNOT_MODIFY_ADMIN = "CANNOT_MODIFY_ADMIN";
     public static final String INVALID_DATE_RANGE = "INVALID_DATE_RANGE";
 
+    public static final String FEEDBACK_NOT_FOUND = "FEEDBACK_NOT_FOUND";
+    public static final String FEEDBACK_ALREADY_REPLIED = "FEEDBACK_ALREADY_REPLIED";
+
     private ErrorCodes() {}
 }

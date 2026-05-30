@@ -72,6 +72,8 @@ native actuator response shape.
 | `USER_NOT_FOUND`              | 404  | Admin lookup targeted a user id that does not exist. Introduced in Phase 4A. |
 | `CANNOT_MODIFY_ADMIN`         | 403  | Admin action targeted another admin user. Admin-on-admin mutation is disallowed to prevent accidental lock-out from the panel. Introduced in Phase 4A. |
 | `INVALID_DATE_RANGE`          | 400  | Admin usage-overview filter has `from` later than `to`. Introduced in Phase 4A. |
+| `FEEDBACK_NOT_FOUND`          | 404  | Admin reply targeted a feedback id that does not exist. Introduced in Phase 4B. |
+| `FEEDBACK_ALREADY_REPLIED`    | 409  | Admin reply targeted feedback that has already been replied to. Introduced in Phase 4B. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -1299,6 +1301,213 @@ regardless of the caller's current plan.
 - `500 INTERNAL_ERROR` — the stored payload could not be deserialised.
   Defensive branch only.
 
+### `GET /user/preferences`
+
+Returns the authenticated user's currently-saved market preference, or an
+empty marker when none is set. Backs the Account page picker's initial state.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+- Reads the at-most-one `user_preferences` row for the user (V10 enforces
+  `UNIQUE (user_id)`).
+- When a row exists, `set` is `true` and `preferenceType` / `preferenceValue`
+  carry it. When no row exists, `set` is `false` and both fields are omitted.
+- This is the saved-default read. The dashboard one-time override is a
+  separate, session-only concept passed in the `POST /reports/generate` body
+  and is never persisted here (D-061).
+
+**Success response (200) — preference set:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "set": true,
+    "preferenceType": "TRADING_STYLE",
+    "preferenceValue": "SWING_TRADER"
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Success response (200) — no preference:**
+
+```json
+{
+  "success": true,
+  "data": { "set": false },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+
+### `GET /user/preferences/options`
+
+Returns the static picklist for the two-step preference selector: the four
+preference types and the allowed values per type. The response is identical
+for every user and carries no per-user state — the user's current selection
+comes from `GET /user/preferences`.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+- `TRADING_STYLE`, `PREFERRED_SESSION`, and `RISK_PROFILE` values come from the
+  `PreferenceValue` enum; `FAVORITE_PAIR` values are the supported pair symbols
+  sourced from `analysis.entity.Pair` (the single source of truth for symbols,
+  D-061).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "types": [
+      { "preferenceType": "TRADING_STYLE", "values": ["SCALPER", "INTRADAY", "SWING_TRADER", "POSITION_TRADER"] },
+      { "preferenceType": "PREFERRED_SESSION", "values": ["ASIAN", "LONDON", "NEW_YORK"] },
+      { "preferenceType": "RISK_PROFILE", "values": ["CONSERVATIVE", "BALANCED", "AGGRESSIVE"] },
+      { "preferenceType": "FAVORITE_PAIR", "values": ["EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD", "USD/CAD", "NZD/USD", "XAU/USD"] }
+    ]
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+
+### `PUT /user/preferences`
+
+Sets or replaces the authenticated user's saved preference. Upserts the single
+`user_preferences` row.
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** required.
+
+```json
+{
+  "preferenceType": "RISK_PROFILE",
+  "preferenceValue": "CONSERVATIVE"
+}
+```
+
+**Validation rules:**
+- Both fields are required and non-blank, else `400 VALIDATION_FAILED`.
+- `preferenceType` must be one of `TRADING_STYLE`, `PREFERRED_SESSION`,
+  `RISK_PROFILE`, `FAVORITE_PAIR` (case-insensitive, trimmed).
+- `preferenceValue` must be valid for the chosen type:
+
+| `preferenceType`     | Valid `preferenceValue`                                   |
+|----------------------|-----------------------------------------------------------|
+| `TRADING_STYLE`      | `SCALPER`, `INTRADAY`, `SWING_TRADER`, `POSITION_TRADER`   |
+| `PREFERRED_SESSION`  | `ASIAN`, `LONDON`, `NEW_YORK`                             |
+| `RISK_PROFILE`       | `CONSERVATIVE`, `BALANCED`, `AGGRESSIVE`                   |
+| `FAVORITE_PAIR`      | any supported pair symbol (e.g. `EUR/USD`)                |
+
+  Non-pair values are matched case-insensitively against the enum; pair symbols
+  are validated via `Pair.fromSymbol`. A value not valid for the type returns
+  `400 VALIDATION_FAILED`.
+
+**Behaviour:**
+- When a row exists it is replaced in place (type + value), else a new row is
+  inserted. `updated_at` is stamped on write.
+- Returns the saved preference in the same shape as `GET /user/preferences`.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "set": true,
+    "preferenceType": "RISK_PROFILE",
+    "preferenceValue": "CONSERVATIVE"
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `400 VALIDATION_FAILED` — missing field, unknown type, or value invalid for
+  the type.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+
+### `DELETE /user/preferences`
+
+Removes the authenticated user's saved preference (reset to no preference).
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** none
+
+**Behaviour:**
+- Deletes the user's `user_preferences` row if present. Idempotent — when no
+  row exists the call still succeeds (the end state, "no preference", is the
+  same either way).
+- After this call the report flow applies default market-based ranking with no
+  compatibility scoring until a new preference is set.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": null,
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+
+### `POST /feedback`
+
+Submits feedback from the authenticated user (Account page Feedback modal).
+
+**Authentication:** required (Bearer JWT)
+
+**Request body:** required.
+
+```json
+{
+  "content": "The weekend lock message could show my local time too."
+}
+```
+
+**Validation rules:**
+- `content` is required, non-blank, max 5000 characters, else
+  `400 VALIDATION_FAILED`.
+
+**Behaviour:**
+- Persists a `feedback` row with `status = PENDING` and the current timestamp.
+- No email is sent. PRD §10's user thank-you and admin-notification emails are
+  Phase 5A; this endpoint only records the submission (D-064).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 91,
+    "createdAt": "2026-05-17T08:00:00Z"
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `400 VALIDATION_FAILED` — blank or oversized content.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+
 ## Admin endpoints
 
 All endpoints under `/admin` require an `ADMIN` role on the JWT. Non-admin
@@ -1323,8 +1532,8 @@ records state transitions, not button presses.
 ### `GET /admin/dashboard/stats`
 
 Returns the quick-stats counter strip rendered at the top of the Admin
-Dashboard page. Analytics chart endpoints land in Phase 4B and complete the
-page; this endpoint covers the four static numbers PRD §9.3 specifies.
+Dashboard page. The four analytics chart endpoints below complete the page;
+this endpoint covers the four static numbers PRD §9.3 specifies.
 
 **Authentication:** required (Bearer JWT, role `ADMIN`)
 
@@ -1354,6 +1563,146 @@ page; this endpoint covers the four static numbers PRD §9.3 specifies.
     "totalFreeUsersActive": 83,
     "usersAtZeroRemainingReports": 6
   },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `GET /admin/dashboard/revenue`
+
+Revenue per forex market month for the dashboard revenue chart. Covers a
+trailing 12-forex-month window ending with the current forex month; months
+with no revenue are present with a zero value so the chart axis is continuous.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none
+
+**Behaviour:**
+- Sums every paid top-up event in `subscription_audit_logs` whose `action` is
+  one of `TOP_UP`, `ADMIN_TOP_UP`, or `ADMIN_PLAN_CHANGE`, valuing each at the
+  price of the plan it credited (`new_plan` → `subscription_plans.price`).
+  `TOP_UP` is the Phase 5B Midtrans payment; the two admin actions are the
+  manual billing path used while Midtrans onboarding is pending (D-065, P48).
+- Each event is bucketed by the forex market month of its `created_at`,
+  computed against the same 22:00 UTC forex-day boundary used elsewhere
+  (D-030, D-065).
+- `month` is `YYYY-MM`. `revenue` is a decimal USD sum. Ordered oldest month
+  first.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": [
+    { "month": "2026-04", "revenue": 120.00 },
+    { "month": "2026-05", "revenue": 260.00 }
+  ],
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `GET /admin/dashboard/new-subscribers`
+
+New (first-time) subscribers per forex market month for the dashboard chart.
+Same trailing 12-forex-month window and zero-fill as the revenue endpoint.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none
+
+**Behaviour:**
+- A user counts once, in the forex market month of their **earliest** paid
+  top-up event (`MIN(created_at)` over the same paid-action set as the revenue
+  endpoint, grouped by user). This is the only dated first-payment signal —
+  `has_ever_paid` is an undated boolean (D-065).
+- `month` is `YYYY-MM`; `count` is the number of first-time subscribers in that
+  month. Ordered oldest month first.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": [
+    { "month": "2026-04", "count": 6 },
+    { "month": "2026-05", "count": 11 }
+  ],
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `GET /admin/dashboard/active-inactive`
+
+Current active-vs-inactive split of non-admin users for the dashboard chart.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none
+
+**Behaviour:**
+- Returns the current counts of non-admin users with `is_active = true` and
+  `is_active = false`. This is a point-in-time snapshot, not a time series:
+  the schema records only the present `is_active` value with no historical
+  snapshots, so a true series cannot be reconstructed from existing data
+  (D-065). Admin users are excluded, consistent with the user list.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "active": 478,
+    "inactive": 23
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `GET /admin/dashboard/report-volume`
+
+Daily report-generation volume for the dashboard chart. Covers a trailing
+30-forex-day window ending with the current forex market date; days with no
+reports are present with a zero count so the chart axis is continuous.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Request body:** none
+
+**Behaviour:**
+- Counts `user_reports` rows grouped by `forex_market_date` over the window.
+  Every report counts, including zero-content "markets consolidating" rows
+  (those still record a generation event; `counted_against_limit` is the
+  separate credit-consumption flag, surfaced on the usage endpoint, not here).
+- `forexMarketDate` is an ISO date; `count` is that day's report count.
+  Ordered oldest day first.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": [
+    { "forexMarketDate": "2026-05-16", "count": 0 },
+    { "forexMarketDate": "2026-05-17", "count": 31 }
+  ],
   "timestamp": "2026-05-17T08:00:00Z"
 }
 ```
@@ -1644,3 +1993,113 @@ or live — joined to its owning user for name + email rendering.
 - `400 INVALID_DATE_RANGE` — `from > to`.
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
 - `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+
+### `GET /admin/feedback`
+
+Paginated list of all user feedback for the Admin Feedback Management page.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1` are
+  clamped to `1`. Values past the last page return `items: []` with the true
+  `totalPages`.
+
+**Behaviour:**
+- Page size is fixed at 20 (PRD §9.3).
+- Ordered newest submission first (`created_at DESC`, then `id DESC`).
+- `replied` is the at-a-glance flag derived from the row's status
+  (`REPLIED` → `true`, `PENDING` → `false`). `repliedAt` and `replyContent`
+  are present only on replied rows and omitted otherwise.
+- The submitting user's `name` and `email` are joined in a single query
+  (no N+1).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 91,
+        "userId": 42,
+        "userName": "Jane Trader",
+        "userEmail": "trader@example.com",
+        "content": "The weekend lock message could show my local time too.",
+        "submittedAt": "2026-05-17T08:00:00Z",
+        "replied": true,
+        "repliedAt": "2026-05-17T09:30:00Z",
+        "replyContent": "Thanks — we'll add a local-time hint in a future update."
+      },
+      {
+        "id": 90,
+        "userId": 17,
+        "userName": "Sam Lee",
+        "userEmail": "sam@example.com",
+        "content": "Love the consolidating-market message.",
+        "submittedAt": "2026-05-16T22:14:00Z",
+        "replied": false
+      }
+    ],
+    "totalCount": 134,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 7
+  },
+  "timestamp": "2026-05-17T10:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+
+### `POST /admin/feedback/{feedbackId}/reply`
+
+Records an admin reply to a feedback submission and marks it replied.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `feedbackId` — the id of the feedback row to reply to.
+
+**Request body:** required.
+
+```json
+{
+  "replyContent": "Thanks — we'll add a local-time hint in a future update."
+}
+```
+
+**Validation rules:**
+- `replyContent` is required, non-blank, max 5000 characters, else
+  `400 VALIDATION_FAILED`.
+
+**Behaviour:**
+- Transitions the row from `PENDING` to `REPLIED`, stamps `replied_at`, and
+  stores `reply_content`.
+- No email is sent. PRD §10's reply-to-user email is Phase 5A; this endpoint
+  only persists the reply, which is the seam that phase reads from (D-064).
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 91,
+    "replied": true,
+    "repliedAt": "2026-05-17T09:30:00Z",
+    "replyContent": "Thanks — we'll add a local-time hint in a future update."
+  },
+  "timestamp": "2026-05-17T09:30:00Z"
+}
+```
+
+**Errors:**
+- `400 VALIDATION_FAILED` — blank or oversized reply content.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
+- `404 FEEDBACK_NOT_FOUND` — no feedback with the given id.
+- `409 FEEDBACK_ALREADY_REPLIED` — the feedback has already been replied to.

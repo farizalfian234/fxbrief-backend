@@ -11,6 +11,7 @@ import jakarta.persistence.EntityManager;
 import jakarta.persistence.Query;
 import jakarta.persistence.TypedQuery;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
@@ -20,8 +21,9 @@ import java.util.Map;
 
 /**
  * Admin-scoped read queries. Pulls together {@code users}, {@code subscriptions},
- * {@code subscription_plans}, and {@code user_reports} to populate the admin
- * dashboard, user list, and usage overview pages.
+ * {@code subscription_plans}, {@code user_reports}, and (Phase 4B)
+ * {@code subscription_audit_logs} to populate the admin dashboard, user list,
+ * usage overview, and the dashboard analytics charts.
  *
  * Native repository rather than Spring Data because the queries cut across
  * feature modules; placing them in any single feature repository would leak
@@ -30,6 +32,16 @@ import java.util.Map;
  */
 @Repository
 public class AdminQueryRepository {
+
+    /**
+     * Audit actions that represent a paid top-up and therefore count toward
+     * revenue. {@code TOP_UP} is the Midtrans payment introduced in Phase 5B;
+     * the two admin actions are the manual fallback used while Midtrans
+     * onboarding is pending. All three add a plan's worth of report credit at
+     * the plan's price.
+     */
+    private static final List<String> REVENUE_ACTIONS =
+            List.of("TOP_UP", "ADMIN_TOP_UP", "ADMIN_PLAN_CHANGE");
 
     private final EntityManager em;
 
@@ -191,8 +203,95 @@ public class AdminQueryRepository {
         }
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 4B — dashboard analytics
+    // ---------------------------------------------------------------------
+
+    /**
+     * Returns one tuple per revenue-bearing audit event on or after
+     * {@code fromInclusive}: {@code (created_at, new_plan_price)}. Forex-month
+     * bucketing and summation happen in the service so the 22:00 UTC forex-day
+     * boundary stays in one place (the audit table has no forex_market_date
+     * column). Ordered oldest-first.
+     */
+    public List<RevenueEventRow> findRevenueEvents(Instant fromInclusive) {
+        List<Object[]> rows = em.createQuery(
+                "SELECT a.createdAt, a.newPlan.price FROM SubscriptionAuditLog a " +
+                "WHERE a.action IN :actions AND a.newPlan IS NOT NULL " +
+                "AND a.createdAt >= :from " +
+                "ORDER BY a.createdAt ASC", Object[].class)
+                .setParameter("actions", REVENUE_ACTIONS)
+                .setParameter("from", fromInclusive)
+                .getResultList();
+        List<RevenueEventRow> out = new ArrayList<>(rows.size());
+        for (Object[] row : rows) {
+            out.add(new RevenueEventRow((Instant) row[0], (BigDecimal) row[1]));
+        }
+        return out;
+    }
+
+    /**
+     * Returns, per user, the timestamp of that user's earliest revenue-bearing
+     * audit event — i.e. when they first became a paying subscriber. Used to
+     * bucket first-time subscribers by forex month. Users who have never paid
+     * are absent.
+     */
+    public List<Instant> findFirstPaidInstants() {
+        return em.createQuery(
+                "SELECT MIN(a.createdAt) FROM SubscriptionAuditLog a " +
+                "WHERE a.action IN :actions " +
+                "GROUP BY a.user.id", Instant.class)
+                .setParameter("actions", REVENUE_ACTIONS)
+                .getResultList();
+    }
+
+    /**
+     * Daily report-generation volume by forex market date on or after
+     * {@code fromInclusive}, ordered oldest day first.
+     */
+    public List<DailyVolumeRow> findDailyReportVolume(LocalDate fromInclusive) {
+        List<Object[]> rows = em.createQuery(
+                "SELECT r.forexMarketDate, COUNT(r) FROM UserReport r " +
+                "WHERE r.forexMarketDate >= :from " +
+                "GROUP BY r.forexMarketDate ORDER BY r.forexMarketDate ASC", Object[].class)
+                .setParameter("from", fromInclusive)
+                .getResultList();
+        List<DailyVolumeRow> out = new ArrayList<>(rows.size());
+        for (Object[] row : rows) {
+            out.add(new DailyVolumeRow((LocalDate) row[0], ((Number) row[1]).longValue()));
+        }
+        return out;
+    }
+
+    public long countActiveUsers(short adminRoleId) {
+        return em.createQuery(
+                "SELECT COUNT(u) FROM User u WHERE u.role.id <> :adminRoleId AND u.active = true",
+                Long.class)
+                .setParameter("adminRoleId", adminRoleId)
+                .getSingleResult();
+    }
+
+    public long countInactiveUsers(short adminRoleId) {
+        return em.createQuery(
+                "SELECT COUNT(u) FROM User u WHERE u.role.id <> :adminRoleId AND u.active = false",
+                Long.class)
+                .setParameter("adminRoleId", adminRoleId)
+                .getSingleResult();
+    }
+
     /**
      * Projection tuple for the user list page.
      */
     public record UserSubscriptionRow(User user, Subscription subscription) {}
+
+    /**
+     * Projection tuple for a single revenue event: the event timestamp and the
+     * price of the plan credited.
+     */
+    public record RevenueEventRow(Instant createdAt, BigDecimal price) {}
+
+    /**
+     * Projection tuple for daily report volume.
+     */
+    public record DailyVolumeRow(LocalDate forexMarketDate, long count) {}
 }

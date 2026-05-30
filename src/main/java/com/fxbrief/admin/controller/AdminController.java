@@ -1,11 +1,15 @@
 package com.fxbrief.admin.controller;
 
+import com.fxbrief.admin.dto.ActiveInactiveView;
 import com.fxbrief.admin.dto.AdminAccountStatusView;
 import com.fxbrief.admin.dto.AdminDashboardStatsView;
 import com.fxbrief.admin.dto.AdminTopUpRequest;
 import com.fxbrief.admin.dto.AdminTopUpView;
 import com.fxbrief.admin.dto.AdminUsageView;
 import com.fxbrief.admin.dto.AdminUserListView;
+import com.fxbrief.admin.dto.DailyReportVolumePoint;
+import com.fxbrief.admin.dto.MonthlyCountPoint;
+import com.fxbrief.admin.dto.MonthlyRevenuePoint;
 import com.fxbrief.admin.service.AdminQueryService;
 import com.fxbrief.admin.service.AdminService;
 import com.fxbrief.auth.security.AuthenticatedUser;
@@ -25,6 +29,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.LocalDate;
+import java.util.List;
 
 @RestController
 @RequestMapping("/admin")
@@ -38,6 +43,26 @@ public class AdminController {
     @GetMapping("/dashboard/stats")
     public ResponseEntity<ApiResponse<AdminDashboardStatsView>> getDashboardStats() {
         return ResponseEntity.ok(ApiResponse.success(adminQueryService.getDashboardStats()));
+    }
+
+    @GetMapping("/dashboard/revenue")
+    public ResponseEntity<ApiResponse<List<MonthlyRevenuePoint>>> getRevenue() {
+        return ResponseEntity.ok(ApiResponse.success(adminQueryService.getMonthlyRevenue()));
+    }
+
+    @GetMapping("/dashboard/new-subscribers")
+    public ResponseEntity<ApiResponse<List<MonthlyCountPoint>>> getNewSubscribers() {
+        return ResponseEntity.ok(ApiResponse.success(adminQueryService.getNewSubscribersPerMonth()));
+    }
+
+    @GetMapping("/dashboard/active-inactive")
+    public ResponseEntity<ApiResponse<ActiveInactiveView>> getActiveInactive() {
+        return ResponseEntity.ok(ApiResponse.success(adminQueryService.getActiveInactive()));
+    }
+
+    @GetMapping("/dashboard/report-volume")
+    public ResponseEntity<ApiResponse<List<DailyReportVolumePoint>>> getReportVolume() {
+        return ResponseEntity.ok(ApiResponse.success(adminQueryService.getDailyReportVolume()));
     }
 
     @GetMapping("/users")
