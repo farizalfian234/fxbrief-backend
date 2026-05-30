@@ -39,5 +39,9 @@ public final class ErrorCodes {
     public static final String FEEDBACK_NOT_FOUND = "FEEDBACK_NOT_FOUND";
     public static final String FEEDBACK_ALREADY_REPLIED = "FEEDBACK_ALREADY_REPLIED";
 
+    public static final String WEEKLY_SUMMARY_NOT_FOUND = "WEEKLY_SUMMARY_NOT_FOUND";
+    public static final String INVALID_WEEKLY_SUMMARY_STATUS = "INVALID_WEEKLY_SUMMARY_STATUS";
+    public static final String WEEKLY_SUMMARY_NOT_PUBLISHABLE = "WEEKLY_SUMMARY_NOT_PUBLISHABLE";
+
     private ErrorCodes() {}
 }

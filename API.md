@@ -74,6 +74,9 @@ native actuator response shape.
 | `INVALID_DATE_RANGE`          | 400  | Admin usage-overview filter has `from` later than `to`. Introduced in Phase 4A. |
 | `FEEDBACK_NOT_FOUND`          | 404  | Admin reply targeted a feedback id that does not exist. Introduced in Phase 4B. |
 | `FEEDBACK_ALREADY_REPLIED`    | 409  | Admin reply targeted feedback that has already been replied to. Introduced in Phase 4B. |
+| `WEEKLY_SUMMARY_NOT_FOUND`    | 404  | Weekly summary id (admin) or published slug (public) does not exist. Introduced in Phase 4C. |
+| `INVALID_WEEKLY_SUMMARY_STATUS` | 400 | A status value supplied to the admin list filter or update is not one of `DRAFT`, `PUBLISHED`, `ARCHIVED`. Introduced in Phase 4C. |
+| `WEEKLY_SUMMARY_NOT_PUBLISHABLE` | 409 | Publish was attempted on a summary with no admin content. Introduced in Phase 4C. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -2103,3 +2106,301 @@ Records an admin reply to a feedback submission and marks it replied.
 - `403 FORBIDDEN` — caller is authenticated but does not hold the `ADMIN` role.
 - `404 FEEDBACK_NOT_FOUND` — no feedback with the given id.
 - `409 FEEDBACK_ALREADY_REPLIED` — the feedback has already been replied to.
+
+### `GET /admin/weekly-summaries`
+
+Paginated list of weekly market summaries for the admin review page.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1` are
+  clamped to `1`.
+- `status` — optional. When present, filters to one status; must be one of
+  `DRAFT`, `PUBLISHED`, `ARCHIVED` (case-insensitive). Absent means all
+  statuses.
+
+**Behaviour:**
+- Page size is fixed at 20.
+- Ordered newest-created first (`created_at DESC`).
+- Rows carry metadata only; `claude_draft` and `admin_content` are returned by
+  the detail endpoint, not the list.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 7,
+        "title": "FX–Brief Weekly Recap — Week of May 25, 2026",
+        "slug": "week-of-may-25-2026",
+        "weekStart": "2026-05-25",
+        "weekEnd": "2026-05-29",
+        "status": "DRAFT",
+        "publishedAt": null,
+        "createdAt": "2026-05-30T22:30:11Z",
+        "updatedAt": "2026-05-30T22:30:11Z"
+      }
+    ],
+    "totalCount": 7,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 1
+  },
+  "timestamp": "2026-05-30T23:00:00Z"
+}
+```
+
+**Errors:**
+- `400 INVALID_WEEKLY_SUMMARY_STATUS` — unrecognised `status` filter value.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+
+### `GET /admin/weekly-summaries/{id}`
+
+Full admin view of a single summary, including the Claude draft and the
+admin-edited content for review.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the weekly summary id.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 7,
+    "title": "FX–Brief Weekly Recap — Week of May 25, 2026",
+    "slug": "week-of-may-25-2026",
+    "weekStart": "2026-05-25",
+    "weekEnd": "2026-05-29",
+    "claudeDraft": "The week opened with broad USD strength...",
+    "adminContent": null,
+    "status": "DRAFT",
+    "publishedAt": null,
+    "createdAt": "2026-05-30T22:30:11Z",
+    "updatedAt": "2026-05-30T22:30:11Z"
+  },
+  "timestamp": "2026-05-30T23:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `404 WEEKLY_SUMMARY_NOT_FOUND` — no summary with the given id.
+
+### `PUT /admin/weekly-summaries/{id}`
+
+Saves the admin-edited content and, optionally, changes status.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the weekly summary id.
+
+**Request body:** required.
+
+```json
+{
+  "adminContent": "The week opened with broad USD strength as...",
+  "status": "PUBLISHED"
+}
+```
+
+**Validation rules:**
+- `adminContent` is required, non-blank, max 50000 characters, else
+  `400 VALIDATION_FAILED`.
+- `status` is optional. When present it must be one of `DRAFT`, `PUBLISHED`,
+  `ARCHIVED` (case-insensitive), else `400 INVALID_WEEKLY_SUMMARY_STATUS`.
+
+**Behaviour:**
+- `adminContent` is always saved (trimmed).
+- When `status` transitions to `PUBLISHED`, `published_at` is set to now and a
+  sitemap entry for `/weekly-recap/{slug}` is upserted. Publishing requires
+  non-blank admin content, else `409 WEEKLY_SUMMARY_NOT_PUBLISHABLE`.
+- When `status` transitions to `ARCHIVED`, the sitemap entry for the path is
+  removed.
+- A `status` equal to the current status is a no-op for the transition (content
+  is still saved).
+- `POST .../publish` and `POST .../archive` are the dedicated equivalents and
+  apply the identical transition logic.
+
+**Success response (200):** the full `WeeklySummaryDetailView` (same shape as
+`GET /admin/weekly-summaries/{id}`) reflecting the saved state.
+
+**Errors:**
+- `400 VALIDATION_FAILED` — blank or oversized `adminContent`.
+- `400 INVALID_WEEKLY_SUMMARY_STATUS` — unrecognised `status`.
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `404 WEEKLY_SUMMARY_NOT_FOUND` — no summary with the given id.
+- `409 WEEKLY_SUMMARY_NOT_PUBLISHABLE` — publish attempted with no admin content.
+
+### `POST /admin/weekly-summaries/{id}/publish`
+
+Publishes a summary: sets status to `PUBLISHED`, stamps `published_at`, and
+upserts the sitemap entry for `/weekly-recap/{slug}`.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the weekly summary id.
+
+**Request body:** none.
+
+**Behaviour:**
+- Requires non-blank `admin_content`.
+- Idempotent on an already-published row (no second sitemap write of a changed
+  timestamp beyond the upsert).
+
+**Success response (200):** the full `WeeklySummaryDetailView` with
+`status = "PUBLISHED"` and a populated `publishedAt`.
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `404 WEEKLY_SUMMARY_NOT_FOUND` — no summary with the given id.
+- `409 WEEKLY_SUMMARY_NOT_PUBLISHABLE` — no admin content to publish.
+
+### `POST /admin/weekly-summaries/{id}/archive`
+
+Archives a summary: sets status to `ARCHIVED` and removes its sitemap entry.
+
+**Authentication:** required (Bearer JWT, role `ADMIN`)
+
+**Path parameters:**
+- `id` — the weekly summary id.
+
+**Request body:** none.
+
+**Success response (200):** the full `WeeklySummaryDetailView` with
+`status = "ARCHIVED"`.
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 FORBIDDEN` — caller does not hold the `ADMIN` role.
+- `404 WEEKLY_SUMMARY_NOT_FOUND` — no summary with the given id.
+
+## Public endpoints
+
+Unauthenticated, read-only endpoints under `/public`. These are on the
+`SecurityConfig` allowlist and require no JWT. CORS applies as for every other
+route.
+
+### `GET /public/weekly-summaries`
+
+Paginated list of published weekly recaps for the public recap index.
+
+**Authentication:** none.
+
+**Query parameters:**
+- `page` — optional, integer, 1-indexed. Defaults to `1`. Values below `1` are
+  clamped to `1`.
+
+**Behaviour:**
+- Returns only `PUBLISHED` summaries. Page size is fixed at 20.
+- Ordered most-recently-published first (`published_at DESC`).
+- `excerpt` is the first 200 characters of `admin_content`.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "items": [
+      {
+        "id": 7,
+        "title": "FX–Brief Weekly Recap — Week of May 25, 2026",
+        "slug": "week-of-may-25-2026",
+        "weekStart": "2026-05-25",
+        "weekEnd": "2026-05-29",
+        "publishedAt": "2026-05-31T09:12:00Z",
+        "excerpt": "The week opened with broad USD strength as..."
+      }
+    ],
+    "totalCount": 4,
+    "page": 1,
+    "pageSize": 20,
+    "totalPages": 1
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:** none beyond the standard envelope; an empty archive returns
+`items: []`.
+
+### `GET /public/weekly-summaries/{slug}`
+
+Full published recap content by slug.
+
+**Authentication:** none.
+
+**Path parameters:**
+- `slug` — the recap slug, e.g. `week-of-may-25-2026`.
+
+**Behaviour:**
+- Returns `content` (the admin-edited copy) only. `claude_draft` is never
+  exposed publicly.
+- A slug that exists but is not `PUBLISHED` returns `404` — the same response as
+  an unknown slug, so draft/archived existence is not disclosed.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": 7,
+    "title": "FX–Brief Weekly Recap — Week of May 25, 2026",
+    "slug": "week-of-may-25-2026",
+    "weekStart": "2026-05-25",
+    "weekEnd": "2026-05-29",
+    "publishedAt": "2026-05-31T09:12:00Z",
+    "content": "The week opened with broad USD strength as..."
+  },
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:**
+- `404 WEEKLY_SUMMARY_NOT_FOUND` — no published summary with the given slug.
+
+### `GET /public/sitemap-entries`
+
+Returns every sitemap entry. The Phase 6A SSR build consumes this list to
+generate `sitemap.xml`.
+
+**Authentication:** none.
+
+**Behaviour:**
+- Returns all rows, ordered by `path` ascending.
+- A weekly summary contributes a row on publish and the row is removed on
+  archive. Phase 4D will add article rows to the same registry.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "path": "/weekly-recap/week-of-may-25-2026",
+      "lastModified": "2026-05-31T09:12:00Z",
+      "changeFreq": "weekly",
+      "priority": 0.7
+    }
+  ],
+  "timestamp": "2026-05-31T10:00:00Z"
+}
+```
+
+**Errors:** none beyond the standard envelope; an empty registry returns `[]`.
