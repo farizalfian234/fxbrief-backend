@@ -11,6 +11,7 @@ import com.fxbrief.feedback.dto.SubmitFeedbackRequest;
 import com.fxbrief.feedback.entity.Feedback;
 import com.fxbrief.feedback.entity.FeedbackStatus;
 import com.fxbrief.feedback.repository.FeedbackRepository;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.user.entity.User;
 import com.fxbrief.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -28,11 +29,9 @@ import java.util.List;
 /**
  * Feedback domain service: user submission plus the admin read/reply surface.
  *
- * <p>No email is sent in this phase. PRD §10 specifies a user thank-you, an
- * admin notification on submit, and a reply email to the user — all of these
- * are Phase 5A (email notifications) and are explicitly out of scope here. The
- * persisted {@code reply_content} / {@code replied_at} columns are the seam
- * Phase 5A will read from.
+ * <p>On submit, a thank-you email is sent to the user and a notification email
+ * to the admin; on reply, the admin's reply is emailed to the user. All sends
+ * are non-critical and fire after the surrounding transaction commits.
  */
 @Slf4j
 @Service
@@ -43,15 +42,27 @@ public class FeedbackService {
 
     private final FeedbackRepository feedbackRepository;
     private final UserRepository userRepository;
+    private final NotificationService notificationService;
 
     @Transactional
     public FeedbackSubmittedView submit(Long userId, SubmitFeedbackRequest request) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new DomainException(
+                        ErrorCodes.USER_NOT_FOUND,
+                        HttpStatus.NOT_FOUND,
+                        "User not found"));
+
         Feedback feedback = new Feedback();
-        feedback.setUser(userRepository.getReferenceById(userId));
+        feedback.setUser(user);
         feedback.setContent(request.content().trim());
         feedback.setStatus(FeedbackStatus.PENDING);
         feedbackRepository.save(feedback);
         log.info("Feedback submitted id={} user={}", feedback.getId(), userId);
+
+        notificationService.sendFeedbackThankYouEmail(user.getEmail(), user.getName());
+        notificationService.sendFeedbackAdminNotification(
+                user.getName(), user.getEmail(), feedback.getContent(), feedback.getCreatedAt());
+
         return new FeedbackSubmittedView(feedback.getId(), feedback.getCreatedAt());
     }
 
@@ -94,6 +105,10 @@ public class FeedbackService {
         feedbackRepository.save(feedback);
 
         log.info("Feedback replied id={}", feedbackId);
+
+        User user = feedback.getUser();
+        notificationService.sendFeedbackReplyEmail(
+                user.getEmail(), user.getName(), feedback.getReplyContent());
 
         return new AdminFeedbackReplyView(
                 feedback.getId(),

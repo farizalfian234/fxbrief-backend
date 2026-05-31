@@ -6,6 +6,7 @@ import com.fxbrief.auth.security.AccountProperties;
 import com.fxbrief.auth.security.AuthenticatedUser;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.user.entity.User;
 import com.fxbrief.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -24,14 +25,17 @@ public class AccountDeletionService {
 
     private final UserRepository userRepository;
     private final AccountProperties accountProperties;
+    private final NotificationService notificationService;
 
     @Transactional
     public RequestDeletionResponse requestDeletion(AuthenticatedUser principal) {
         User user = loadUser(principal);
 
+        boolean newlyRequested = false;
         if (user.getDeletionRequestedAt() == null) {
             user.setDeletionRequestedAt(Instant.now());
             userRepository.save(user);
+            newlyRequested = true;
         }
 
         Instant deletionDate = user.getDeletionRequestedAt()
@@ -39,6 +43,10 @@ public class AccountDeletionService {
 
         log.info("Account deletion requested for user id={} email={} deletionDate={}",
                 user.getId(), user.getEmail(), deletionDate);
+
+        if (newlyRequested) {
+            notificationService.sendDeletionConfirmationEmail(user.getEmail(), user.getName(), deletionDate);
+        }
 
         return new RequestDeletionResponse(
                 user.getId(),

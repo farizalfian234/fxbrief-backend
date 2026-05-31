@@ -8,6 +8,7 @@ import com.fxbrief.analysis.entity.MarketAnalysis;
 import com.fxbrief.analysis.service.AnalysisEngine;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.report.dto.GenerateReportRequest;
 import com.fxbrief.report.dto.PreferenceSnapshot;
 import com.fxbrief.report.dto.ReportView;
@@ -17,6 +18,8 @@ import com.fxbrief.subscription.entity.PlanCode;
 import com.fxbrief.subscription.entity.Subscription;
 import com.fxbrief.subscription.repository.SubscriptionRepository;
 import com.fxbrief.subscription.service.ForexMarketClock;
+import com.fxbrief.user.entity.User;
+import com.fxbrief.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -58,6 +61,10 @@ import java.util.Optional;
  * <p>Both the generate response and the today-read pass through
  * {@link ReportPayloadNarrower#narrowForLive} so Free and Basic users
  * receive only the data their UI renders (D-055).
+ *
+ * <p>When a generation drives the user's remaining count to zero, a
+ * reports-exhausted email is sent. The commit has already completed by then,
+ * so the send fires immediately rather than via after-commit registration.
  */
 @Slf4j
 @Service
@@ -71,12 +78,14 @@ public class ReportGenerationService {
     private final AnalysisEngine analysisEngine;
     private final SubscriptionRepository subscriptionRepository;
     private final UserReportRepository userReportRepository;
+    private final UserRepository userRepository;
     private final ForexMarketClock forexMarketClock;
     private final ObjectMapper objectMapper;
     private final ReportPayloadNarrower payloadNarrower;
     private final PreferenceResolver preferenceResolver;
     private final PreferenceScorer preferenceScorer;
     private final PayloadReorderer payloadReorderer;
+    private final NotificationService notificationService;
 
     public ReportView generate(Long userId, GenerateReportRequest request) {
         LocalDate forexDate = forexMarketClock.currentForexMarketDate();
@@ -105,6 +114,10 @@ public class ReportGenerationService {
         UserReportWriter.CommitResult result = userReportWriter.commit(
                 userId, forexDate, analysis.row(), payload,
                 snapshotOpt.orElse(null), scores);
+
+        if (result.reportsExhausted()) {
+            sendReportsExhaustedEmail(userId);
+        }
 
         return toView(result.report(), payload,
                 result.remainingReports(), result.reportsExhausted(),
@@ -150,6 +163,11 @@ public class ReportGenerationService {
         return Optional.of(toView(report, payload,
                 subscription.getRemainingReports(), false,
                 snapshot, scores, matches));
+    }
+
+    private void sendReportsExhaustedEmail(Long userId) {
+        userRepository.findById(userId).ifPresent(user ->
+                notificationService.sendReportsExhaustedEmail(user.getEmail(), user.getName()));
     }
 
     private ReportView toView(UserReport report, ReportPayload payload,

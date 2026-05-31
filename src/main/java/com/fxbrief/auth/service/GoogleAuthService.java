@@ -6,6 +6,7 @@ import com.fxbrief.auth.entity.OAuthAccount;
 import com.fxbrief.auth.repository.OAuthAccountRepository;
 import com.fxbrief.auth.security.AccountProperties;
 import com.fxbrief.auth.security.JwtService;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.subscription.service.SubscriptionService;
 import com.fxbrief.user.entity.Role;
 import com.fxbrief.user.entity.SystemRole;
@@ -35,6 +36,7 @@ public class GoogleAuthService {
     private final JwtService jwtService;
     private final AccountProperties accountProperties;
     private final SubscriptionService subscriptionService;
+    private final NotificationService notificationService;
 
     @Transactional
     public LoginResponse login(GoogleLoginRequest request) {
@@ -94,6 +96,9 @@ public class GoogleAuthService {
         subscriptionService.provisionFreePlan(user);
 
         log.info("Created Google-registered user id={} email={}", user.getId(), user.getEmail());
+
+        notificationService.sendWelcomeEmail(user.getEmail(), user.getName());
+
         return user;
     }
 

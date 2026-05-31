@@ -6,6 +6,7 @@ import com.fxbrief.auth.entity.EmailVerificationToken;
 import com.fxbrief.auth.repository.EmailVerificationTokenRepository;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.user.entity.User;
 import com.fxbrief.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +22,7 @@ public class EmailVerificationService {
 
     private final EmailVerificationTokenRepository tokenRepository;
     private final UserRepository userRepository;
+    private final NotificationService notificationService;
 
     @Transactional
     public MessageResponse verify(VerifyEmailRequest request) {
@@ -52,6 +54,8 @@ public class EmailVerificationService {
 
         token.setUsedAt(now);
         tokenRepository.save(token);
+
+        notificationService.sendWelcomeEmail(user.getEmail(), user.getName());
 
         return new MessageResponse("Email verified. Your account is now active.");
     }

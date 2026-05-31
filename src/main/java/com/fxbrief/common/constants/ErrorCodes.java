@@ -49,5 +49,7 @@ public final class ErrorCodes {
     public static final String ARTICLE_SLUG_CONFLICT = "ARTICLE_SLUG_CONFLICT";
     public static final String ARTICLE_DELETE_NOT_ALLOWED = "ARTICLE_DELETE_NOT_ALLOWED";
 
+    public static final String EMAIL_SEND_FAILED = "EMAIL_SEND_FAILED";
+
     private ErrorCodes() {}
 }

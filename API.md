@@ -130,6 +130,29 @@ Allowed headers: `Authorization, Content-Type`.
 Credentials are not allowed (authentication uses bearer tokens, not cookies).
 Preflight responses are cached for 1 hour.
 
+### Email notifications
+
+Several endpoints trigger a transactional email as a **non-blocking side effect**
+(PRD §10, Phase 5A). Email is never part of the request/response contract: it is
+dispatched on a background thread after the triggering transaction commits, and
+any send failure is logged to the `email_logs` table without altering the HTTP
+response. No endpoint returns a different status, body, or error because an email
+succeeded or failed. The seven events and their triggering endpoints:
+
+| Event | Triggered by | Recipient |
+|-------|--------------|-----------|
+| Email verification | `POST /auth/register` | new user |
+| Welcome | `POST /auth/verify-email`, and `POST /auth/google` (new Google user only) | user |
+| Reports exhausted | `POST /reports/generate` when `reportsExhausted` is true | user |
+| Feedback thank-you | `POST /feedback` | user |
+| Feedback admin notification | `POST /feedback` | `ADMIN_NOTIFICATION_EMAIL` |
+| Account deletion confirmation | `POST /auth/request-deletion` (first request only) | user |
+| Feedback reply | `POST /admin/feedback/{feedbackId}/reply` | user |
+
+The password-reset email is intentionally **not** part of this set; the reset
+link remains log-only in v1. `email_logs` rows and the internal
+`EMAIL_SEND_FAILED` marker are operational only and never appear on the wire.
+
 ## Endpoints
 
 ### `GET /actuator/health`
@@ -195,8 +218,10 @@ Registers a new user account.
   password account or a Google account.
 - The account is created with `is_active = false` and assigned the `USER` role.
 - An email verification token is generated, persisted, and the resulting verification link is
-  written to the application log at `INFO` level. Email delivery via SendGrid is introduced
-  in Phase 5A.
+  written to the application log at `INFO` level and emailed to the user via Resend
+  (Phase 5A). The email is sent on a background thread after the registration
+  transaction commits; a send failure is logged and does not affect the
+  registration response (email is non-critical).
 
 **Success response (201):**
 
@@ -242,6 +267,12 @@ Consumes an email verification token and activates the associated user account.
 - If the token is past its 24-hour TTL, `TOKEN_EXPIRED` is returned.
 - On success, the user's `is_active` flag is set to `true` and the token's `used_at` is
   stamped with the current time.
+- A welcome email is sent to the user via Resend (Phase 5A) after the
+  verification transaction commits — explaining the Free plan, the 3 free
+  reports, and how to top up. The email is background and non-critical; a send
+  failure does not affect the verification response. (Google sign-up has no
+  verification step, so the welcome email is sent at account-creation time on
+  the `POST /auth/google` new-user path instead.)
 
 **Success response (200):**
 
@@ -382,7 +413,12 @@ resolves the account using a fixed precedence:
      email so the unverified-email gate no longer applies. A user with a pending
      deletion remains pending; login still succeeds and surfaces `deletionPending`.
    - If no user exists, a new user is created with `is_active = true`, `password_hash`
-     null, `role = USER`, and the Google link is inserted.
+     null, `role = USER`, and the Google link is inserted. A welcome email is sent
+     to the new user via Resend (Phase 5A) — Google sign-up skips email
+     verification, so the welcome email that an email-registered user receives
+     after verification is sent here at creation time instead. The
+     account-linking and returning-user paths do **not** send a welcome email.
+     The send is background and non-critical.
 
 On success, an HS256 JWT is issued identically to `POST /auth/login` (same claims, same
 24-hour TTL). The response shape is identical to the email login response.
@@ -425,8 +461,11 @@ Initiates a password reset.
   without revealing whether the address is registered.
 - If the account exists — whether or not it currently has a password — a 256-bit token is
   generated, its SHA-256 hash is persisted with a 30-minute TTL, and the resulting reset
-  link is written to the application log at `INFO` level. Email delivery via SendGrid is
-  introduced in Phase 5A. The raw token is never returned to the client.
+  link is written to the application log at `INFO` level. The raw token is never returned
+  to the client. The password-reset email is **not** part of the Phase 5A email set
+  (PRD §10 enumerates seven transactional emails and the reset email is not among them),
+  so the reset link remains retrievable via the application log only; it is not sent via
+  Resend in v1.
 - A Google-only account (no `password_hash`) is treated identically to any other account.
   Completing the reset sets a password and the account becomes dual-auth: subsequent
   email logins and Google logins both succeed.
@@ -508,6 +547,11 @@ permanently removed by the daily hard-delete scheduler.
 - If a deletion is already pending, the request is idempotent — the existing
   `deletion_requested_at` is returned unchanged, so repeated clicks do not reset the
   30-day clock.
+- On the transition that newly sets `deletion_requested_at` (first request only), a
+  deletion-confirmation email is sent to the user via Resend (Phase 5A) stating the
+  scheduled deletion date and that logging in before that date cancels the deletion.
+  An idempotent re-request does not re-send the email. The send is background and
+  non-critical.
 - `is_active` is **not** changed by this endpoint. The user can still log in during the grace
   period (login surfaces `deletionPending: true` and `deletionDate` so the frontend can
   render the Deletion Pending Modal). Cancellation is performed via
@@ -832,8 +876,11 @@ The request is processed in three phases.
    content; narrowing is purely a read-time projection (D-055).
 
 The response includes a `reportsExhausted` flag that is `true` when this generation
-caused `remaining_reports` to reach zero. Phase 5A consumes this signal to send the
-report-exhausted email; Phase 3B does not send any email itself.
+caused `remaining_reports` to reach zero. When it is `true`, a reports-exhausted email
+is sent to the user via Resend (Phase 5A) prompting them to top up. The commit has
+already completed at that point, so the send is dispatched immediately on the background
+email executor; a send failure is logged and does not affect the generation response
+(email is non-critical).
 
 The shared-analysis layer makes generation cheap for every user beyond the first in
 each fetch cycle: subsequent callers in the same cycle reuse the existing
@@ -1496,8 +1543,11 @@ Submits feedback from the authenticated user (Account page Feedback modal).
 
 **Behaviour:**
 - Persists a `feedback` row with `status = PENDING` and the current timestamp.
-- No email is sent. PRD §10's user thank-you and admin-notification emails are
-  Phase 5A; this endpoint only records the submission (D-064).
+- After the transaction commits, two emails are sent via Resend (Phase 5A): a
+  thank-you email to the submitting user, and a notification email carrying the
+  full feedback content to `ADMIN_NOTIFICATION_EMAIL`. Both are background and
+  non-critical — a send failure is logged to `email_logs` and never affects the
+  submission response.
 
 **Success response (200):**
 
@@ -2087,8 +2137,10 @@ Records an admin reply to a feedback submission and marks it replied.
 **Behaviour:**
 - Transitions the row from `PENDING` to `REPLIED`, stamps `replied_at`, and
   stores `reply_content`.
-- No email is sent. PRD §10's reply-to-user email is Phase 5A; this endpoint
-  only persists the reply, which is the seam that phase reads from (D-064).
+- After the transaction commits, the admin's reply is emailed to the user via
+  Resend (Phase 5A) with subject `Re: Your feedback on FX–Brief`. The send is
+  background and non-critical — a failure is logged to `email_logs` and does not
+  affect the reply response.
 
 **Success response (200):**
 

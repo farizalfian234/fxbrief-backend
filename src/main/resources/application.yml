@@ -76,6 +76,11 @@ fxbrief:
     base-url: ${FRONTEND_BASE_URL}
   account:
     deletion-grace-days: 30
+  notification:
+    api-key: ${RESEND_API_KEY}
+    from-email: ${RESEND_FROM_EMAIL}
+    from-name: FX–Brief
+    admin-email: ${ADMIN_NOTIFICATION_EMAIL}
   scheduler:
     hard-delete-cron: "0 15 22 * * *"
     market-data-fetch-interval-ms: 3600000          # 60 minutes
@@ -175,6 +180,12 @@ resilience4j:
         exponential-backoff-multiplier: 2
         retry-exceptions:
           - com.fxbrief.common.exception.DomainException
+      resend:
+        max-attempts: 3
+        wait-duration: 2s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
   circuitbreaker:
     instances:
       twelveData:
@@ -190,6 +201,12 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 2
         register-health-indicator: false
       claude:
+        sliding-window-size: 10
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: false
+      resend:
         sliding-window-size: 10
         failure-rate-threshold: 60
         wait-duration-in-open-state: 60s

@@ -9,6 +9,7 @@ import com.fxbrief.auth.security.FrontendProperties;
 import com.fxbrief.auth.validator.DisposableEmailDomainRegistry;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.subscription.service.SubscriptionService;
 import com.fxbrief.user.entity.Role;
 import com.fxbrief.user.entity.SystemRole;
@@ -39,6 +40,7 @@ public class RegistrationService {
     private final AuthProperties authProperties;
     private final FrontendProperties frontendProperties;
     private final SubscriptionService subscriptionService;
+    private final NotificationService notificationService;
 
     @Transactional
     public RegisterResponse register(RegisterRequest request) {
@@ -77,8 +79,11 @@ public class RegistrationService {
         token.setExpiresAt(Instant.now().plus(Duration.ofHours(authProperties.emailVerificationTtlHours())));
         tokenRepository.save(token);
 
+        String verificationLink = buildVerificationLink(token.getToken());
         log.info("Registered user id={} email={} verificationLink={}",
-                user.getId(), user.getEmail(), buildVerificationLink(token.getToken()));
+                user.getId(), user.getEmail(), verificationLink);
+
+        notificationService.sendVerificationEmail(user.getEmail(), user.getName(), verificationLink);
 
         return new RegisterResponse(
                 user.getId(),
