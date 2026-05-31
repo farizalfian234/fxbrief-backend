@@ -2,12 +2,9 @@ package com.fxbrief.subscription.service;
 
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
-import com.fxbrief.subscription.dto.CarryOverView;
 import com.fxbrief.subscription.dto.PlanView;
 import com.fxbrief.subscription.dto.RemainingReportsView;
 import com.fxbrief.subscription.dto.SubscriptionView;
-import com.fxbrief.subscription.dto.TopUpInitiationView;
-import com.fxbrief.subscription.dto.TopUpRequest;
 import com.fxbrief.subscription.entity.PlanCode;
 import com.fxbrief.subscription.entity.Subscription;
 import com.fxbrief.subscription.entity.SubscriptionPlan;
@@ -93,35 +90,6 @@ public class SubscriptionService {
         return toPlanView(resolveEffectivePlan(loadSubscription(userId)));
     }
 
-    /**
-     * Initiates a top-up and returns the carry-over preview for the frontend warning
-     * modal. No persistent state is changed: the actual plan change and report-count
-     * mutation are performed by Phase 5B on Midtrans payment confirmation.
-     *
-     * paymentUrl is null in Phase 2B — the field shape is fixed so the frontend
-     * contract is stable, and Phase 5B will populate it from the Midtrans charge
-     * response.
-     */
-    @Transactional(readOnly = true)
-    public TopUpInitiationView initiateTopUp(Long userId, TopUpRequest request) {
-        PlanCode targetCode = parseTopUpPlan(request.plan());
-        Subscription subscription = loadSubscription(userId);
-
-        SubscriptionPlan targetPlan = planRepository.getReferenceById(targetCode.getId());
-        int remaining = subscription.getRemainingReports();
-        int additional = targetPlan.getReportCount();
-        int newTotal = remaining + additional;
-
-        boolean warningFlag = remaining > 0;
-        CarryOverView carryOver = new CarryOverView(remaining, additional, newTotal);
-
-        return new TopUpInitiationView(
-                toPlanView(targetPlan),
-                null,
-                warningFlag,
-                carryOver);
-    }
-
     private Subscription loadSubscription(Long userId) {
         return subscriptionRepository.findByUserId(userId)
                 .orElseThrow(() -> new DomainException(
@@ -159,27 +127,6 @@ public class SubscriptionService {
             return basePlan;
         }
         return planRepository.getReferenceById(PlanCode.FREE.getId());
-    }
-
-    private PlanCode parseTopUpPlan(String plan) {
-        if (plan == null) {
-            throw invalidTopUpPlan();
-        }
-        String normalised = plan.trim().toUpperCase();
-        if (normalised.equals(PlanCode.BASIC.getCode())) {
-            return PlanCode.BASIC;
-        }
-        if (normalised.equals(PlanCode.PREMIUM.getCode())) {
-            return PlanCode.PREMIUM;
-        }
-        throw invalidTopUpPlan();
-    }
-
-    private DomainException invalidTopUpPlan() {
-        return new DomainException(
-                ErrorCodes.INVALID_PLAN_FOR_TOP_UP,
-                HttpStatus.BAD_REQUEST,
-                "Top-up target must be BASIC or PREMIUM");
     }
 
     private PlanView toPlanView(SubscriptionPlan plan) {

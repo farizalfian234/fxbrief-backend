@@ -51,5 +51,10 @@ public final class ErrorCodes {
 
     public static final String EMAIL_SEND_FAILED = "EMAIL_SEND_FAILED";
 
+    public static final String EXCHANGE_RATE_UNAVAILABLE = "EXCHANGE_RATE_UNAVAILABLE";
+    public static final String PAYMENT_NOT_AVAILABLE = "PAYMENT_NOT_AVAILABLE";
+    public static final String PAYMENT_INITIATION_FAILED = "PAYMENT_INITIATION_FAILED";
+    public static final String INVALID_PAYMENT_SIGNATURE = "INVALID_PAYMENT_SIGNATURE";
+
     private ErrorCodes() {}
 }

@@ -44,6 +44,7 @@ public class SecurityConfig {
                                 "/auth/verify-email",
                                 "/auth/forgot-password",
                                 "/auth/reset-password",
+                                "/payment/webhook",
                                 "/public/**",
                                 "/actuator/health",
                                 "/actuator/health/**",

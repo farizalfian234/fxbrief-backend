@@ -2,9 +2,10 @@ package com.fxbrief.subscription.controller;
 
 import com.fxbrief.auth.security.AuthenticatedUser;
 import com.fxbrief.common.dto.ApiResponse;
+import com.fxbrief.payment.dto.SnapTransactionView;
+import com.fxbrief.payment.service.PaymentService;
 import com.fxbrief.subscription.dto.RemainingReportsView;
 import com.fxbrief.subscription.dto.SubscriptionView;
-import com.fxbrief.subscription.dto.TopUpInitiationView;
 import com.fxbrief.subscription.dto.TopUpRequest;
 import com.fxbrief.subscription.service.SubscriptionService;
 import jakarta.validation.Valid;
@@ -23,6 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
 public class SubscriptionController {
 
     private final SubscriptionService subscriptionService;
+    private final PaymentService paymentService;
 
     @GetMapping
     public ResponseEntity<ApiResponse<SubscriptionView>> getSubscription(
@@ -39,10 +41,10 @@ public class SubscriptionController {
     }
 
     @PostMapping("/top-up")
-    public ResponseEntity<ApiResponse<TopUpInitiationView>> initiateTopUp(
+    public ResponseEntity<ApiResponse<SnapTransactionView>> initiateTopUp(
             @AuthenticationPrincipal AuthenticatedUser principal,
             @Valid @RequestBody TopUpRequest request) {
         return ResponseEntity.ok(ApiResponse.success(
-                subscriptionService.initiateTopUp(principal.id(), request)));
+                paymentService.initiateTopUp(principal.id(), request)));
     }
 }

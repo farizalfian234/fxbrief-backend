@@ -47,6 +47,9 @@ public class User {
     @Column(name = "has_ever_paid", nullable = false)
     private boolean hasEverPaid;
 
+    @Column(name = "payment_beta_access", nullable = false)
+    private boolean paymentBetaAccess;
+
     @Column(name = "deletion_requested_at")
     private Instant deletionRequestedAt;
 

@@ -82,6 +82,10 @@ native actuator response shape.
 | `INVALID_ARTICLE_CATEGORY`    | 400  | A category value supplied to a filter, create, or update is not one of the six article categories. Introduced in Phase 4D. |
 | `ARTICLE_SLUG_CONFLICT`       | 409  | The resolved slug already belongs to another article. Introduced in Phase 4D. |
 | `ARTICLE_DELETE_NOT_ALLOWED`  | 400  | Hard delete attempted on an article that is not in `DRAFT` status. Introduced in Phase 4D. |
+| `PAYMENT_NOT_AVAILABLE`       | 403  | Top-up attempted while in the Midtrans sandbox phase by a user without `payment_beta_access`. Introduced in Phase 5B. |
+| `INVALID_PAYMENT_SIGNATURE`   | 401  | Midtrans webhook payload failed `SHA-512` signature verification. Introduced in Phase 5B. |
+| `EXCHANGE_RATE_UNAVAILABLE`   | 503  | No USD/IDR rate is currently cached (cold start before the first successful fetch). Affects top-up creation and `GET /api/exchange-rate`. Introduced in Phase 5B. |
+| `PAYMENT_INITIATION_FAILED`   | 503  | Midtrans Snap transaction creation failed after retries; circuit breaker may be open. Introduced in Phase 5B. |
 | `INTERNAL_ERROR`              | 500  | Unhandled server error. Details written to logs only. |
 
 Additional codes are introduced per phase as features are added.
@@ -639,9 +643,9 @@ as the primary dashboard payload.
      generated their last report, `effectivePlan` continues to match the base plan.
   A top-up (Phase 5B) restores `remainingReports > 0` and `effectivePlan` reverts to the
   paid plan immediately.
-- `hasEverPaid` is read from the `users` row. Phase 5B will be responsible for flipping it
-  on first successful payment; in Phase 2A and Phase 2B the value is always `false` for
-  any newly registered user.
+- `hasEverPaid` is read from the `users` row. The Phase 5B Midtrans webhook flips it to
+  `true` on the first successful payment and it is never cleared thereafter; for a newly
+  registered user who has never paid the value is `false`.
 - `marketOpen` is computed server-side from the JVM's UTC clock. It is `false` between
   Friday 22:00 UTC and Sunday 22:00 UTC (the forex weekend window) and `true` at all
   other times. The boolean is recomputed on every request — there is no caching.
@@ -715,14 +719,16 @@ phase).
 
 ### `POST /subscription/top-up`
 
-Initiates a top-up for the authenticated user. Returns the carry-over preview the
-frontend uses to render the warning modal before redirecting to Midtrans.
+Initiates a top-up for the authenticated user by creating a Midtrans Snap transaction
+and returning the Snap token the frontend uses to open the Snap payment popup. The same
+response carries the carry-over preview the frontend renders in the warning modal before
+opening the popup.
 
-**This endpoint does not perform a payment.** The actual plan change, report-count
-mutation, and audit row are written by the Phase 5B Midtrans confirmation handler. The
-Phase 2B endpoint is a read-only preparation step that surfaces the carry-over
-calculation and warning flag to the frontend so the right UX can be shown before
-payment.
+**This endpoint does not change the subscription.** The plan change, report-count
+mutation, and audit row are written only when Midtrans confirms the payment via the
+webhook (see `POST /payment/webhook`). Creating the Snap transaction records a
+`PENDING` row in `payment_transactions`; nothing in `subscriptions` is touched until a
+verified successful callback arrives.
 
 **Authentication:** required (Bearer JWT)
 
@@ -741,6 +747,11 @@ payment.
 **Behaviour:**
 - The target plan code is validated. `BASIC` and `PREMIUM` are the only accepted values;
   anything else (including `FREE`) returns `INVALID_PLAN_FOR_TOP_UP`.
+- **Beta gate.** While the deployment runs against the Midtrans sandbox
+  (`MIDTRANS_IS_PRODUCTION=false`), only users with `payment_beta_access = true` may
+  proceed; others receive `403 PAYMENT_NOT_AVAILABLE` with the message "Payment is not
+  yet available. Please wait for the full launch." In production the flag is ignored and
+  all authenticated users may pay.
 - The authenticated user's current `subscriptions` row is read. `remainingReports` is
   preserved in the response as the carry-over base; per PRD §5.7, remaining reports
   always carry over and are never lost on a plan switch.
@@ -748,16 +759,18 @@ payment.
   where `additionalReports` is the target plan's `report_count` (20 for both Basic and
   Premium) and `newTotal = remainingReports + additionalReports`.
 - `warningFlag` is `true` when `remainingReports > 0`. The frontend uses this to decide
-  whether to show the carry-over warning modal before redirecting to payment (PRD §5.7).
-  A Free user and a lapsed user with 0 remaining both receive `warningFlag = false` and
-  no warning modal is shown.
-- `paymentUrl` is `null` in this phase. Midtrans charge creation lands in Phase 5B and
-  will populate this field with the hosted payment-page URL. The field is in the
-  response shape now so the frontend integration contract is stable across the Phase 2B /
-  Phase 5B transition.
-- No subscription state is mutated. No `subscription_audit_logs` row is written — the
-  audit row corresponding to a top-up is emitted by Phase 5B when payment is confirmed
-  and the plan/remaining count actually change.
+  whether to show the carry-over warning modal before opening the Snap popup (PRD §5.7).
+  A Free user and a lapsed user with 0 remaining both receive `warningFlag = false`.
+- The charge is priced in IDR. The current USD/IDR rate (see `GET /api/exchange-rate`) is
+  read and the plan's USD price is converted to a whole-rupiah gross amount (rounded to
+  the nearest rupiah). `exchangeRate` is the rate applied and `amountIdr` is the gross
+  amount sent to Midtrans. The rate in effect at creation time is also stored on the
+  transaction for audit.
+- A Midtrans Snap transaction is created with `order_id = FXBRIEF-{userId}-{timestampMillis}`.
+  The response returns `snapToken` and `clientKey`; the frontend opens the Snap popup with
+  these (no redirect). `orderId` is returned for client-side reference.
+- No subscription state is mutated and no `subscription_audit_logs` row is written here —
+  those happen on confirmed payment via the webhook.
 
 **Success response (200):**
 
@@ -771,8 +784,12 @@ payment.
       "price": 20.00,
       "reportQuota": 20
     },
-    "paymentUrl": null,
+    "orderId": "FXBRIEF-42-1747468800000",
+    "snapToken": "66e4fa55-fdac-4ef9-91b5-733b97d1b862",
+    "clientKey": "SB-Mid-client-xxxxxxxxxxxxxxxx",
     "warningFlag": true,
+    "exchangeRate": 16250.000000,
+    "amountIdr": 325000,
     "carryOverCalculation": {
       "remainingReports": 7,
       "additionalReports": 20,
@@ -787,8 +804,86 @@ payment.
 - `400 VALIDATION_FAILED` — request validation failed (e.g. missing `plan`).
 - `400 INVALID_PLAN_FOR_TOP_UP` — `plan` is not `BASIC` or `PREMIUM`.
 - `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `403 PAYMENT_NOT_AVAILABLE` — sandbox phase and the user is not whitelisted for payment.
+- `404 USER_NOT_FOUND` — the authenticated user record could not be loaded.
 - `404 NOT_FOUND` — no subscription exists for the authenticated user (see notes on
   `GET /subscription`).
+- `503 EXCHANGE_RATE_UNAVAILABLE` — no USD/IDR rate is currently cached (cold start before
+  the first successful fetch).
+- `503 PAYMENT_INITIATION_FAILED` — the Midtrans Snap transaction could not be created.
+
+### `GET /api/exchange-rate`
+
+Returns the current USD/IDR rate the backend uses to price top-ups, for display on the
+top-up screen.
+
+**Authentication:** required (Bearer JWT)
+
+**Behaviour:**
+- Returns the single cached rate row. The rate is refreshed daily at 22:45 UTC and on
+  startup when the cached value is older than 24 hours; a failed refresh leaves the last
+  known rate in place.
+- `usdToIdr` is the rate; `fetchedAt` is when it was last successfully fetched from the
+  upstream source.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": {
+    "usdToIdr": 16250.000000,
+    "fetchedAt": "2026-05-17T22:45:01Z"
+  },
+  "timestamp": "2026-05-17T08:00:00Z"
+}
+```
+
+**Errors:**
+- `401 UNAUTHENTICATED` — missing or invalid JWT.
+- `503 EXCHANGE_RATE_UNAVAILABLE` — no rate has been cached yet (cold start before the
+  first successful fetch).
+
+### `POST /payment/webhook`
+
+Midtrans HTTP notification (server-to-server callback). Not called by the frontend.
+
+**Authentication:** none. This endpoint is unauthenticated by design and is excluded from
+the JWT filter; authenticity is established by verifying the Midtrans signature on the
+payload, not by a bearer token.
+
+**Behaviour:**
+- The raw JSON body is read as-is. The signature is verified as
+  `SHA-512(order_id + status_code + gross_amount + server_key)` compared (constant-time)
+  against the payload's `signature_key`. A mismatch is rejected with `401` and no state is
+  changed.
+- The raw payload is recorded in `payment_callbacks` for audit.
+- The transaction is located by `order_id`. An unknown order id is acknowledged with `200`
+  and ignored. A transaction already marked paid is acknowledged with `200` as a duplicate
+  and not re-credited (idempotent).
+- On the first successful Midtrans status (`capture` or `settlement`, with `fraud_status`
+  of `accept` or absent): the paid plan is assigned, 20 reports are added with carry-over
+  (`remaining + 20`), `has_ever_paid` is set, the new plan is propagated to today's
+  unarchived report row if one exists, and a `TOP_UP` row is written to
+  `subscription_audit_logs` with `performed_by` equal to the paying user. The transaction
+  is marked `PAID`. The credited plan and count come from the stored transaction, not from
+  the webhook payload.
+- Terminal unsuccessful statuses (`deny`, `cancel`, `expire`, `failure`) mark the
+  transaction `FAILED`. Other statuses are acknowledged with no state change.
+
+**Success response (200):**
+
+```json
+{
+  "success": true,
+  "data": null,
+  "timestamp": "2026-05-17T08:05:00Z"
+}
+```
+
+**Errors:**
+- `400 MALFORMED_REQUEST` — the body is empty or not valid JSON.
+- `401 INVALID_PAYMENT_SIGNATURE` — the signature did not match.
 
 ### `POST /reports/generate`
 

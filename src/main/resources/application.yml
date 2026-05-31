@@ -81,6 +81,19 @@ fxbrief:
     from-email: ${RESEND_FROM_EMAIL}
     from-name: FX–Brief
     admin-email: ${ADMIN_NOTIFICATION_EMAIL}
+  midtrans:
+    server-key: ${MIDTRANS_SERVER_KEY}
+    client-key: ${MIDTRANS_CLIENT_KEY}
+    production: ${MIDTRANS_IS_PRODUCTION}
+    sandbox-snap-base-url: https://app.sandbox.midtrans.com
+    production-snap-base-url: https://app.midtrans.com
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
+  exchange-rate:
+    base-url: https://open.er-api.com
+    startup-refresh-threshold-hours: 24            # startup fetch only if cached rate older than this
+    connect-timeout-ms: 10000
+    read-timeout-ms: 30000
   scheduler:
     hard-delete-cron: "0 15 22 * * *"
     market-data-fetch-interval-ms: 3600000          # 60 minutes
@@ -90,6 +103,7 @@ fxbrief:
     report-archive-cron: "0 0 22 * * *"             # daily 22:00 UTC — forex market day reset boundary
     weekly-summary-cron: "0 30 22 * * SAT"          # weekly Sat 22:30 UTC — 30m after the forex week closes
     article-publish-cron: "0 0/15 * * * *"          # every 15 minutes — promotes due SCHEDULED articles
+    exchange-rate-cron: "0 45 22 * * *"             # daily 22:45 UTC — USD/IDR refresh for Midtrans pricing
   weekly-summary:
     lookback-days: 5                                # forex market days aggregated per recap (Mon-Fri)
   rate-limit:
@@ -186,6 +200,18 @@ resilience4j:
         exponential-backoff-multiplier: 2
         retry-exceptions:
           - com.fxbrief.common.exception.DomainException
+      midtrans:
+        max-attempts: 3
+        wait-duration: 2s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
+      exchangeRate:
+        max-attempts: 3
+        wait-duration: 2s
+        exponential-backoff-multiplier: 2
+        retry-exceptions:
+          - com.fxbrief.common.exception.DomainException
   circuitbreaker:
     instances:
       twelveData:
@@ -207,6 +233,18 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 3
         register-health-indicator: false
       resend:
+        sliding-window-size: 10
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: false
+      midtrans:
+        sliding-window-size: 10
+        failure-rate-threshold: 60
+        wait-duration-in-open-state: 60s
+        permitted-number-of-calls-in-half-open-state: 3
+        register-health-indicator: false
+      exchangeRate:
         sliding-window-size: 10
         failure-rate-threshold: 60
         wait-duration-in-open-state: 60s
