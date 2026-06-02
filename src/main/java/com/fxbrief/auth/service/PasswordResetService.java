@@ -9,6 +9,7 @@ import com.fxbrief.auth.security.AuthProperties;
 import com.fxbrief.auth.security.FrontendProperties;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.user.entity.User;
 import com.fxbrief.user.repository.UserRepository;
 import lombok.RequiredArgsConstructor;
@@ -36,6 +37,7 @@ public class PasswordResetService {
     private final TokenGenerator tokenGenerator;
     private final AuthProperties authProperties;
     private final FrontendProperties frontendProperties;
+    private final NotificationService notificationService;
 
     @Transactional
     public MessageResponse requestReset(ForgotPasswordRequest request) {
@@ -57,8 +59,11 @@ public class PasswordResetService {
         token.setExpiresAt(Instant.now().plus(Duration.ofMinutes(authProperties.passwordResetTtlMinutes())));
         tokenRepository.save(token);
 
+        String resetLink = buildResetLink(rawToken);
         log.info("Generated password reset for user id={} email={} resetLink={}",
-                user.getId(), user.getEmail(), buildResetLink(rawToken));
+                user.getId(), user.getEmail(), resetLink);
+
+        notificationService.sendPasswordResetEmail(user.getEmail(), user.getName(), resetLink);
 
         return new MessageResponse(GENERIC_FORGOT_MESSAGE);
     }

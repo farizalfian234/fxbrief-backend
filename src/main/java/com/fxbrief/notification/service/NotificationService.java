@@ -114,6 +114,27 @@ public class NotificationService {
                 EmailEventType.FEEDBACK_REPLY));
     }
 
+    public void sendPasswordResetEmail(String recipient, String name, String resetUrl) {
+        String appUrl = appUrlProvider.appUrl();
+        schedule(new EmailMessage(
+                recipient,
+                templates.passwordResetSubject(),
+                templates.passwordResetHtml(appUrl, name, resetUrl),
+                templates.passwordResetText(name, resetUrl),
+                EmailEventType.PASSWORD_RESET));
+    }
+
+    public void sendTopUpSuccessEmail(String recipient, String name, String planName,
+                                      int reportsAdded, int previousCount, int newTotal) {
+        String appUrl = appUrlProvider.appUrl();
+        schedule(new EmailMessage(
+                recipient,
+                templates.topUpSuccessSubject(),
+                templates.topUpSuccessHtml(appUrl, name, planName, reportsAdded, previousCount, newTotal),
+                templates.topUpSuccessText(appUrl, name, planName, reportsAdded, previousCount, newTotal),
+                EmailEventType.TOP_UP_SUCCESS));
+    }
+
     private void schedule(EmailMessage message) {
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fxbrief.common.constants.ErrorCodes;
 import com.fxbrief.common.exception.DomainException;
+import com.fxbrief.notification.service.NotificationService;
 import com.fxbrief.payment.entity.PaymentCallback;
 import com.fxbrief.payment.entity.PaymentStatus;
 import com.fxbrief.payment.entity.PaymentTransaction;
@@ -41,7 +42,9 @@ import java.util.Set;
  * top-up (AdminService): assign the paid plan, add 20 reports with carry-over, flip
  * {@code has_ever_paid}, propagate the new plan to today's unarchived report row when one
  * exists, and write a {@code TOP_UP} audit row with {@code performed_by} equal to the
- * paying user (D-034).
+ * paying user (D-034). A top-up-success email is then sent to the paying user; like all
+ * notification sends it fires after this transaction commits, so a duplicate delivery
+ * (which returns before re-crediting) never produces a second email.
  */
 @Slf4j
 @Service
@@ -65,6 +68,7 @@ public class PaymentWebhookService {
     private final UserRepository userRepository;
     private final UserReportRepository userReportRepository;
     private final ForexMarketClock forexMarketClock;
+    private final NotificationService notificationService;
 
     @Transactional
     public void handleNotification(String rawPayload) {
@@ -134,7 +138,8 @@ public class PaymentWebhookService {
         int oldRemaining = subscription.getRemainingReports();
 
         SubscriptionPlan newPlan = planRepository.getReferenceById(targetCode.getId());
-        int newRemaining = oldRemaining + newPlan.getReportCount();
+        int reportsAdded = newPlan.getReportCount();
+        int newRemaining = oldRemaining + reportsAdded;
 
         subscription.setPlan(newPlan);
         subscription.setRemainingReports(newRemaining);
@@ -146,6 +151,10 @@ public class PaymentWebhookService {
         propagateNewPlanToTodayUnarchivedReport(userId, targetCode.getId());
 
         writeTopUpAuditLog(user, oldPlan, newPlan, oldRemaining, newRemaining);
+
+        notificationService.sendTopUpSuccessEmail(
+                user.getEmail(), user.getName(), targetCode.getDisplayName(),
+                reportsAdded, oldRemaining, newRemaining);
     }
 
     /**

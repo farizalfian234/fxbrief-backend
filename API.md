@@ -137,11 +137,12 @@ Preflight responses are cached for 1 hour.
 ### Email notifications
 
 Several endpoints trigger a transactional email as a **non-blocking side effect**
-(PRD §10, Phase 5A). Email is never part of the request/response contract: it is
-dispatched on a background thread after the triggering transaction commits, and
-any send failure is logged to the `email_logs` table without altering the HTTP
-response. No endpoint returns a different status, body, or error because an email
-succeeded or failed. The seven events and their triggering endpoints:
+(PRD §10, Phase 5A; password-reset and top-up-success added later). Email is
+never part of the request/response contract: it is dispatched on a background
+thread after the triggering transaction commits, and any send failure is logged
+to the `email_logs` table without altering the HTTP response. No endpoint returns
+a different status, body, or error because an email succeeded or failed. The nine
+events and their triggering endpoints:
 
 | Event | Triggered by | Recipient |
 |-------|--------------|-----------|
@@ -152,10 +153,11 @@ succeeded or failed. The seven events and their triggering endpoints:
 | Feedback admin notification | `POST /feedback` | `ADMIN_NOTIFICATION_EMAIL` |
 | Account deletion confirmation | `POST /auth/request-deletion` (first request only) | user |
 | Feedback reply | `POST /admin/feedback/{feedbackId}/reply` | user |
+| Password reset | `POST /auth/forgot-password` (only when the account exists) | user |
+| Top-up success | `POST /payment/webhook` on first confirmed top-up | paying user |
 
-The password-reset email is intentionally **not** part of this set; the reset
-link remains log-only in v1. `email_logs` rows and the internal
-`EMAIL_SEND_FAILED` marker are operational only and never appear on the wire.
+`email_logs` rows and the internal `EMAIL_SEND_FAILED` marker are operational
+only and never appear on the wire.
 
 ## Endpoints
 
@@ -465,11 +467,12 @@ Initiates a password reset.
   without revealing whether the address is registered.
 - If the account exists — whether or not it currently has a password — a 256-bit token is
   generated, its SHA-256 hash is persisted with a 30-minute TTL, and the resulting reset
-  link is written to the application log at `INFO` level. The raw token is never returned
-  to the client. The password-reset email is **not** part of the Phase 5A email set
-  (PRD §10 enumerates seven transactional emails and the reset email is not among them),
-  so the reset link remains retrievable via the application log only; it is not sent via
-  Resend in v1.
+  link is written to the application log at `INFO` level and emailed to the user via Resend
+  (subject "Reset your FX–Brief password"; the email states the link expires in 1 hour).
+  The raw token is never returned to the client. The email is sent only in this
+  account-exists branch — never in the not-found branch — so it does not reveal whether an
+  address is registered; the send is background and non-critical, so a send failure does
+  not affect the generic success response.
 - A Google-only account (no `password_hash`) is treated identically to any other account.
   Completing the reset sets a password and the account becomes dual-auth: subsequent
   email logins and Google logins both succeed.
@@ -867,7 +870,11 @@ payload, not by a bearer token.
   unarchived report row if one exists, and a `TOP_UP` row is written to
   `subscription_audit_logs` with `performed_by` equal to the paying user. The transaction
   is marked `PAID`. The credited plan and count come from the stored transaction, not from
-  the webhook payload.
+  the webhook payload. A top-up-success email is then sent to the paying user via Resend
+  (subject "Your FX–Brief reports are ready") summarising the plan, reports added,
+  previous balance, and new total; it is dispatched after the transaction commits, so a
+  duplicate webhook delivery (acknowledged as already-paid above) never sends a second
+  email, and a send failure never affects the `200` acknowledgement.
 - Terminal unsuccessful statuses (`deny`, `cancel`, `expire`, `failure`) mark the
   transaction `FAILED`. Other statuses are acknowledged with no state change.
 

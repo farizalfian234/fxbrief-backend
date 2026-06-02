@@ -198,6 +198,63 @@ public class EmailTemplates {
                 + footerText();
     }
 
+    // ---- Password reset -----------------------------------------------------
+
+    public String passwordResetSubject() {
+        return "Reset your FX–Brief password";
+    }
+
+    public String passwordResetHtml(String appUrl, String name, String resetUrl) {
+        String body = paragraph("Hi " + esc(name) + ",")
+                + paragraph("We received a request to reset your password. Click the button below to "
+                    + "choose a new one.")
+                + button(resetUrl, "Reset Password")
+                + paragraph("This link expires in 1 hour. If you didn’t request a password reset, you can "
+                    + "safely ignore this email — your account remains unchanged.");
+        return shell(appUrl, body);
+    }
+
+    public String passwordResetText(String name, String resetUrl) {
+        return "Hi " + name + ",\n\n"
+                + "We received a request to reset your password. Open the link below to choose a new one.\n\n"
+                + resetUrl + "\n\n"
+                + "This link expires in 1 hour. If you didn’t request a password reset, you can safely "
+                + "ignore this email — your account remains unchanged.\n\n"
+                + footerText();
+    }
+
+    // ---- Top-up success -----------------------------------------------------
+
+    public String topUpSuccessSubject() {
+        return "Your FX–Brief reports are ready";
+    }
+
+    public String topUpSuccessHtml(String appUrl, String name, String planName,
+                                   int reportsAdded, int previousCount, int newTotal) {
+        String body = paragraph("Hi " + esc(name) + ",")
+                + paragraph("Your top-up was successful. Here’s what’s been added to your account:")
+                + paragraph("Plan: " + esc(planName)
+                    + "<br>Reports added: " + reportsAdded
+                    + "<br>Previous balance: " + previousCount
+                    + "<br>New total: " + newTotal)
+                + paragraph("Head back to the app whenever you’re ready.")
+                + button(appUrl + "/dashboard", "Go to Dashboard");
+        return shell(appUrl, body);
+    }
+
+    public String topUpSuccessText(String appUrl, String name, String planName,
+                                   int reportsAdded, int previousCount, int newTotal) {
+        return "Hi " + name + ",\n\n"
+                + "Your top-up was successful. Here’s what’s been added to your account:\n\n"
+                + "Plan: " + planName + "\n"
+                + "Reports added: " + reportsAdded + "\n"
+                + "Previous balance: " + previousCount + "\n"
+                + "New total: " + newTotal + "\n\n"
+                + "Head back to the app whenever you’re ready.\n\n"
+                + "Go to your dashboard: " + appUrl + "/dashboard\n\n"
+                + footerText();
+    }
+
     // ---- Shared shell -------------------------------------------------------
 
     private String shell(String appUrl, String bodyContent) {
