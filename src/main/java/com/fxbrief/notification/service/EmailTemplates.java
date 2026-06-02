@@ -219,7 +219,7 @@ public class EmailTemplates {
                 + bodyContent
                 + "</td></tr>"
                 + "<tr><td style=\"padding:20px 24px;text-align:center;font-size:12px;color:#8a8f98;\">"
-                + footerHtml()
+                + footerHtml(appUrl)
                 + "</td></tr>"
                 + "</table></body></html>";
     }
@@ -241,8 +241,13 @@ public class EmailTemplates {
         return "<a href=\"" + url + "\" style=\"color:" + NAVY + ";\">" + esc(text) + "</a>";
     }
 
-    private String footerHtml() {
-        return "© 2026 FX–Brief · Privacy Policy · Terms of Service · Support";
+    private String footerHtml(String appUrl) {
+        String base = stripTrailingSlash(appUrl);
+        String linkStyle = "color:#8a8f98;text-decoration:underline;";
+        String privacy = "<a href=\"" + base + "/privacy\" style=\"" + linkStyle + "\">Privacy Policy</a>";
+        String terms = "<a href=\"" + base + "/terms\" style=\"" + linkStyle + "\">Terms of Service</a>";
+        String support = "<a href=\"" + base + "/support\" style=\"" + linkStyle + "\">Support</a>";
+        return "© 2026 FX–Brief · " + privacy + " · " + terms + " · " + support;
     }
 
     private String footerText() {
