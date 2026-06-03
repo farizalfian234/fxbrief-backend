@@ -14,13 +14,17 @@ import java.math.BigDecimal;
  * over. {@code carryOverCalculation} breaks down the resulting report total.
  * {@code exchangeRate} is the USD/IDR rate used to price this charge, surfaced for
  * display. {@code amountIdr} is the whole-rupiah gross amount sent to Midtrans.
- * {@code clientKey} lets the frontend initialise the Snap SDK.
+ * {@code clientKey} and {@code production} let the frontend initialise the Snap SDK
+ * against the matching environment: when {@code production} is false the sandbox
+ * {@code snap.js} must be loaded, otherwise the production one. A token minted in one
+ * environment cannot be opened by the other.
  */
 public record SnapTransactionView(
         PlanView targetPlan,
         String orderId,
         String snapToken,
         String clientKey,
+        boolean production,
         boolean warningFlag,
         BigDecimal exchangeRate,
         long amountIdr,

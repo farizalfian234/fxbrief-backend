@@ -102,6 +102,7 @@ public class PaymentService {
                 orderId,
                 snapToken.token(),
                 midtransProperties.clientKey(),
+                midtransProperties.production(),
                 warningFlag,
                 rate.getUsdToIdr(),
                 amountIdr,

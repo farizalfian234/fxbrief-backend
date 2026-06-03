@@ -770,8 +770,14 @@ verified successful callback arrives.
   amount sent to Midtrans. The rate in effect at creation time is also stored on the
   transaction for audit.
 - A Midtrans Snap transaction is created with `order_id = FXBRIEF-{userId}-{timestampMillis}`.
-  The response returns `snapToken` and `clientKey`; the frontend opens the Snap popup with
-  these (no redirect). `orderId` is returned for client-side reference.
+  The response returns `snapToken`, `clientKey`, and `production`; the frontend opens the
+  Snap popup with these (no redirect). `orderId` is returned for client-side reference.
+  `production` tells the frontend which Snap environment the token belongs to and therefore
+  which `snap.js` to load: when `false`, the sandbox script
+  (`https://app.sandbox.midtrans.com/snap/snap.js`); when `true`, the production script
+  (`https://app.midtrans.com/snap/snap.js`). A token created in one environment cannot be
+  opened by the other, so the frontend must select the script using this flag rather than
+  hardcoding it.
 - No subscription state is mutated and no `subscription_audit_logs` row is written here —
   those happen on confirmed payment via the webhook.
 
@@ -790,6 +796,7 @@ verified successful callback arrives.
     "orderId": "FXBRIEF-42-1747468800000",
     "snapToken": "66e4fa55-fdac-4ef9-91b5-733b97d1b862",
     "clientKey": "SB-Mid-client-xxxxxxxxxxxxxxxx",
+    "production": false,
     "warningFlag": true,
     "exchangeRate": 16250.000000,
     "amountIdr": 325000,
