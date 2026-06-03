@@ -60,15 +60,28 @@ public class ClaudeNarrativeGenerator {
             analysis for a single currency pair. Produce a JSON object with exactly these six \
             fields, no more, no less:
               - pair: the pair symbol exactly as given
+
               - setupStatus: ONE line. Human-readable signal state.
-              - shortReasoning: ONE OR TWO sentences. Plain-English explanation of why this \
-            setup is or is not actionable.
-              - executiveReasoning: THREE TO FIVE sentences. Readable narrative covering the \
-            "so what". No markdown, no bullet lists, no headings.
+
+              - shortReasoning: EXACTLY ONE sentence, MAXIMUM 120 CHARACTERS. \
+            No price levels, no zone numbers, no percentages, no R:R figures — those belong \
+            in the structured data. One punchy reason why the setup is or is not actionable. \
+            Example: "Confirmed short at H4 supply with M15 BOS — low conviction due to deep \
+            penetration and fundamental conflict."
+
+              - executiveReasoning: EXACTLY THREE short sentences. No price levels, no zone \
+            numbers, no percentages — the structured data carries those. Each sentence is \
+            concise; no run-ons, no listing, no semicolons stringing clauses together. \
+            Sentence 1: what is happening and the key reason. Sentence 2: the main risk or \
+            concern. Sentence 3: what to watch for next.
+
               - invalidationNote: ONE sentence. State the specific price-based invalidation \
             condition using only price levels supplied in the structured input.
-              - fundamentalSummary: TWO OR THREE sentences. How any supplied high-impact \
-            economic events affect this specific pair's setup.
+
+              - fundamentalSummary: EXACTLY TWO short sentences. No long lists. Sentence 1: \
+            the one or two most relevant economic events this week and their potential \
+            impact — not a roll-call of every supplied event. Sentence 2: how this affects \
+            the specific setup direction for this pair.
 
             Do not invent, estimate, or recompute any numeric value, price level, percentage, \
             ratio, or score. Use only the numbers supplied in the structured input verbatim.

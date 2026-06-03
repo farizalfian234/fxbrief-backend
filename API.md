@@ -1001,7 +1001,7 @@ each fetch cycle: subsequent callers in the same cycle reuse the existing
       "pairs": [
         { "pair": "GBP/USD", "signalState": "CONFIRMED",
           "setupStatus": "Confirmed long near H4 demand — high conviction",
-          "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+          "shortReasoning": "Confirmed long at H4 demand with M15 BOS — high conviction with fresh zone and Fibonacci confluence.",
           "executiveReasoning": "...",
           "invalidationNote": "Bullish bias invalidates if H4 closes below 1.27500.",
           "fundamentalSummary": "...",
@@ -1075,6 +1075,25 @@ text fields per PRD §8.4) with three audit-driven trims applied:
 `barIndex`) are `0`, and `fundamental.events` is filtered to Medium and
 High importance only.
 
+The five Claude-generated text fields follow per-field shape constraints
+(D-089). The backend validates these at generation time; out-of-band
+content downgrades that pair to per-pair fallback so the response always
+carries fields that meet the spec.
+
+| Field | Sentences | Max chars | Price levels |
+|-------|-----------|-----------|--------------|
+| `setupStatus` | 1 line | 200 (soft) | allowed |
+| `shortReasoning` | exactly 1 | 120 (hard) | forbidden |
+| `executiveReasoning` | exactly 3 | 280 (hard) | forbidden |
+| `invalidationNote` | 1 | 250 (soft) | allowed (the field's purpose) |
+| `fundamentalSummary` | exactly 2 | 200 (hard) | forbidden |
+
+For the three "forbidden price levels" fields, the validator rejects any
+token matching `\b\d+\.\d{3,}\b` — meaning numeric content like
+`1.0823`, `0.382`, or `2.5` is not permitted. Discrete prices and ratios
+live in the structured fields (`activeZone`, `tradePlan`,
+`confidence.factors`); the prose fields are pure interpretation.
+
 **Success response (200) — Free or Basic:**
 
 ```json
@@ -1092,7 +1111,7 @@ High importance only.
         "majorNewsRisk": true,
         "signalState": "CONFIRMED",
         "setupStatus": "Confirmed long near H4 demand — high conviction",
-        "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+        "shortReasoning": "Confirmed long at H4 demand with M15 BOS — high conviction with fresh zone and Fibonacci confluence.",
         "tradePlan": { "direction": "LONG", "entryLow": 1.27500, "entryHigh": 1.27650, "takeProfit": 1.28400, "stopLoss": 1.27300 }
       },
       "compactPreviews": [
@@ -1400,7 +1419,7 @@ omitted (no upsell affordance is exposed inside archived content per the
         "majorNewsRisk": true,
         "signalState": "CONFIRMED",
         "setupStatus": "Confirmed long near H4 demand — high conviction",
-        "shortReasoning": "H4 bullish BOS with M15 follow-through. Fresh zone with Fibonacci confluence supports the entry.",
+        "shortReasoning": "Confirmed long at H4 demand with M15 BOS — high conviction with fresh zone and Fibonacci confluence.",
         "tradePlan": { "direction": "LONG", "entryLow": 1.27500, "entryHigh": 1.27650, "takeProfit": 1.28400, "stopLoss": 1.27300 }
       },
       "marketsConsolidating": false,

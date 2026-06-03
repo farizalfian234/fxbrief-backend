@@ -26,14 +26,16 @@ import java.util.Map;
  * Single-mega-call narrative generator. One Claude request produces five
  * named text fields for every analysed pair plus one report-level summary.
  *
- * <h2>Per PRD §8.4</h2>
+ * <h2>Per PRD §8.4 (tightened by DECISIONS D-089)</h2>
  * Claude generates exactly the following per pair:
  * <ul>
  *   <li>{@code setupStatus} — 1 line</li>
- *   <li>{@code shortReasoning} — 1–2 sentences</li>
- *   <li>{@code executiveReasoning} — 3–5 sentences</li>
+ *   <li>{@code shortReasoning} — exactly 1 sentence, max 120 characters, no
+ *       price levels or zone numbers</li>
+ *   <li>{@code executiveReasoning} — exactly 3 short sentences, no price
+ *       levels or zone numbers (those live in the structured data)</li>
  *   <li>{@code invalidationNote} — 1 sentence</li>
- *   <li>{@code fundamentalSummary} — 2–3 sentences</li>
+ *   <li>{@code fundamentalSummary} — exactly 2 short sentences</li>
  * </ul>
  * Plus one report-level {@code summary} of at most 100 characters used for
  * the history table.
@@ -87,16 +89,33 @@ public class MegaCallNarrativeService {
             Per pair, generate:
               - setupStatus: ONE line. Human-readable signal state. Example: \
             "Confirmed short near H4 supply — low conviction due to zone penetration".
-              - shortReasoning: ONE OR TWO sentences. Plain-English explanation of why this setup \
-            is or is not actionable. This is what Free and Basic users see on the pair card.
-              - executiveReasoning: THREE TO FIVE sentences. Readable narrative covering the \
-            "so what" — what the setup is, why it has the confidence level it does, and what to \
-            watch. Confidence-building but not an essay. No markdown, no bullet lists, no headings.
+
+              - shortReasoning: EXACTLY ONE sentence, MAXIMUM 120 CHARACTERS. \
+            No price levels, no zone numbers, no percentages, no R:R figures — those belong \
+            in the structured data. One punchy reason why the setup is or is not actionable. \
+            Example: "Confirmed short at H4 supply with M15 BOS — low conviction due to deep \
+            penetration and fundamental conflict."
+
+              - executiveReasoning: EXACTLY THREE short sentences. No price levels, no zone \
+            numbers, no percentages — the structured data carries those. Each sentence is \
+            concise; no run-ons, no listing, no semicolons stringing clauses together. \
+            Sentence 1: what is happening and the key reason. Sentence 2: the main risk or \
+            concern. Sentence 3: what to watch for next. Example: "A confirmed short setup \
+            sits at H4 supply with weekly and daily bears aligned. Deep penetration of the \
+            zone and a high-impact USD release this week reduce conviction. Watch for a \
+            decisive M15 close back inside the zone to invalidate the entry."
+
               - invalidationNote: ONE sentence. State the specific price-based invalidation \
             condition using only price levels supplied in the structured input. Example: \
             "Bullish bias invalidates if H4 closes above 1.16361."
-              - fundamentalSummary: TWO OR THREE sentences. How the supplied high-impact \
-            economic events affect this specific pair's setup. If no events apply, say so briefly.
+
+              - fundamentalSummary: EXACTLY TWO short sentences. No long lists. Sentence 1: \
+            the one or two most relevant economic events this week and their potential \
+            impact — not a roll-call of every supplied event. Sentence 2: how this affects \
+            the specific setup direction for this pair. Example: "USD NFP and CPI both \
+            print this week, both capable of moving the dollar sharply. A hotter-than- \
+            expected reading would compound the existing fundamental conflict on this \
+            short setup."
 
             For the whole report, generate:
               - summary: AT MOST 100 characters total. A short headline for the history table. \
