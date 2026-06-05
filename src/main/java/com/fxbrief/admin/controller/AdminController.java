@@ -103,8 +103,8 @@ public class AdminController {
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate from,
             @RequestParam(name = "to", required = false)
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate to,
-            @RequestParam(name = "userId", required = false) Long userId) {
+            @RequestParam(name = "user", required = false) String user) {
         return ResponseEntity.ok(ApiResponse.success(
-                adminQueryService.listUsage(page, from, to, userId)));
+                adminQueryService.listUsage(page, from, to, user)));
     }
 }

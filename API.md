@@ -2130,8 +2130,14 @@ or live — joined to its owning user for name + email rendering.
   rows whose `forex_market_date >= from`.
 - `to` — optional, ISO-8601 date (`YYYY-MM-DD`). When set, filters to
   rows whose `forex_market_date <= to`.
-- `userId` — optional numeric id. When set, filters to rows belonging to
-  that user.
+- `user` — optional free-text search string. When set and non-blank,
+  filters to rows whose owning user matches the input on either email or
+  name. Matching is case-insensitive and substring-based
+  (`LOWER(email) LIKE %input%` OR `LOWER(name) LIKE %input%`). The input
+  is trimmed before use; whitespace-only is treated as absent. Literal
+  `%` and `_` in the input are escaped so they match as literals rather
+  than as `LIKE` wildcards. Users without a `name` (Google-OAuth
+  accounts that never set one) are still matchable by email.
 
 **Validation:**
 - If both `from` and `to` are provided and `from > to`, the call returns
@@ -2147,6 +2153,15 @@ or live — joined to its owning user for name + email rendering.
   when the report fell under the zero-content "markets consolidating" rule
   (PRD §5.5). Archived and live rows are both included; the report-archive
   flip at 22:00 UTC does not change the value.
+
+**Example queries:**
+- `/admin/usage?user=jane` — every row whose owning user has `jane` in
+  email or name (e.g. `jane@example.com`, `Jane Trader`,
+  `marjane@example.com`).
+- `/admin/usage?user=@example.com&from=2026-05-01&to=2026-05-31` — May
+  usage for every user on `@example.com`.
+- `/admin/usage?user=trader` — every row whose user matches `trader` in
+  either field (e.g. `Jane Trader`, `daytrader@example.com`).
 
 **Success response (200):**
 

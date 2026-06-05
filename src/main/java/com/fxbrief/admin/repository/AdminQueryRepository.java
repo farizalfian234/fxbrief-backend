@@ -43,6 +43,15 @@ public class AdminQueryRepository {
     private static final List<String> REVENUE_ACTIONS =
             List.of("TOP_UP", "ADMIN_TOP_UP", "ADMIN_PLAN_CHANGE");
 
+    /**
+     * Escape character used with JPQL {@code ESCAPE} clauses so that literal
+     * {@code %} and {@code _} entered by the admin in the usage-overview
+     * search box are treated as literals rather than wildcards. {@code !} is
+     * chosen because it never appears in valid email addresses and is not
+     * reserved by JPQL — avoiding any quoting ambiguity at the JPQL parser.
+     */
+    private static final char LIKE_ESCAPE = '!';
+
     private final EntityManager em;
 
     @Autowired
@@ -136,35 +145,40 @@ public class AdminQueryRepository {
     }
 
     /**
-     * Paginated usage rows with optional date-range and user-id filters.
-     * Ordered newest forex market day first, then newest generation timestamp
-     * within the same day. The query joins {@code user_reports} to {@code users}
-     * eagerly so the response projection can render name + email without an
-     * N+1 lookup.
+     * Paginated usage rows with optional date-range and user-text-search
+     * filters. Ordered newest forex market day first, then newest generation
+     * timestamp within the same day. The query joins {@code user_reports} to
+     * {@code users} eagerly so the response projection can render name +
+     * email without an N+1 lookup.
+     *
+     * {@code userQuery} is matched case-insensitively against both
+     * {@code users.email} and {@code users.name} with surrounding {@code %}
+     * wildcards. Caller is expected to have trimmed the value; null or empty
+     * disables the filter.
      */
     public List<UserReport> findUsageRows(
             LocalDate fromInclusive,
             LocalDate toInclusive,
-            Long userIdFilter,
+            String userQuery,
             int offset,
             int limit) {
         StringBuilder jpql = new StringBuilder("SELECT r FROM UserReport r JOIN FETCH r.user u");
-        appendUsageFilters(jpql, fromInclusive, toInclusive, userIdFilter);
+        appendUsageFilters(jpql, fromInclusive, toInclusive, userQuery);
         jpql.append(" ORDER BY r.forexMarketDate DESC, r.generatedAt DESC, r.id DESC");
 
         TypedQuery<UserReport> query = em.createQuery(jpql.toString(), UserReport.class);
-        bindUsageFilters(query, fromInclusive, toInclusive, userIdFilter);
+        bindUsageFilters(query, fromInclusive, toInclusive, userQuery);
         query.setFirstResult(offset);
         query.setMaxResults(limit);
         return query.getResultList();
     }
 
-    public long countUsageRows(LocalDate fromInclusive, LocalDate toInclusive, Long userIdFilter) {
+    public long countUsageRows(LocalDate fromInclusive, LocalDate toInclusive, String userQuery) {
         StringBuilder jpql = new StringBuilder("SELECT COUNT(r) FROM UserReport r");
-        appendUsageFilters(jpql, fromInclusive, toInclusive, userIdFilter);
+        appendUsageFilters(jpql, fromInclusive, toInclusive, userQuery);
 
         TypedQuery<Long> query = em.createQuery(jpql.toString(), Long.class);
-        bindUsageFilters(query, fromInclusive, toInclusive, userIdFilter);
+        bindUsageFilters(query, fromInclusive, toInclusive, userQuery);
         return query.getSingleResult();
     }
 
@@ -172,7 +186,7 @@ public class AdminQueryRepository {
             StringBuilder jpql,
             LocalDate fromInclusive,
             LocalDate toInclusive,
-            Long userIdFilter) {
+            String userQuery) {
         boolean first = true;
         if (fromInclusive != null) {
             jpql.append(first ? " WHERE" : " AND").append(" r.forexMarketDate >= :from");
@@ -182,8 +196,13 @@ public class AdminQueryRepository {
             jpql.append(first ? " WHERE" : " AND").append(" r.forexMarketDate <= :to");
             first = false;
         }
-        if (userIdFilter != null) {
-            jpql.append(first ? " WHERE" : " AND").append(" r.user.id = :userId");
+        if (hasText(userQuery)) {
+            jpql.append(first ? " WHERE" : " AND")
+                    .append(" (LOWER(r.user.email) LIKE :userPattern ESCAPE '")
+                    .append(LIKE_ESCAPE)
+                    .append("' OR (r.user.name IS NOT NULL AND LOWER(r.user.name) LIKE :userPattern ESCAPE '")
+                    .append(LIKE_ESCAPE)
+                    .append("'))");
         }
     }
 
@@ -191,16 +210,36 @@ public class AdminQueryRepository {
             Query query,
             LocalDate fromInclusive,
             LocalDate toInclusive,
-            Long userIdFilter) {
+            String userQuery) {
         if (fromInclusive != null) {
             query.setParameter("from", fromInclusive);
         }
         if (toInclusive != null) {
             query.setParameter("to", toInclusive);
         }
-        if (userIdFilter != null) {
-            query.setParameter("userId", userIdFilter);
+        if (hasText(userQuery)) {
+            query.setParameter("userPattern", buildLikePattern(userQuery));
         }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    /**
+     * Wraps the search input in {@code %...%} after escaping the JPQL
+     * wildcards {@code %} and {@code _} (and the escape character itself,
+     * {@code !}) and lowercasing the result. The companion JPQL predicate
+     * uses {@code LOWER(column) LIKE :userPattern ESCAPE '!'}, so the input
+     * matches case-insensitively without relying on the Postgres-specific
+     * {@code ILIKE} operator.
+     */
+    private static String buildLikePattern(String input) {
+        String escaped = input
+                .replace("!", "!!")
+                .replace("%", "!%")
+                .replace("_", "!_");
+        return "%" + escaped.toLowerCase() + "%";
     }
 
     // ---------------------------------------------------------------------

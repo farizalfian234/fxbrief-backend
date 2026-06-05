@@ -121,8 +121,14 @@ public class AdminQueryService {
         return new AdminUserListView(items, totalCount, requestedPage, PAGE_SIZE, totalPages);
     }
 
+    /**
+     * Paginated usage overview. {@code userQuery} is an optional free-text
+     * search that matches against either the user's email or name with a
+     * case-insensitive {@code LIKE %...%} on both. Whitespace-only input is
+     * treated as absent (no filter).
+     */
     @Transactional(readOnly = true)
-    public AdminUsageView listUsage(int page, LocalDate from, LocalDate to, Long userId) {
+    public AdminUsageView listUsage(int page, LocalDate from, LocalDate to, String userQuery) {
         if (from != null && to != null && from.isAfter(to)) {
             throw new DomainException(
                     ErrorCodes.INVALID_DATE_RANGE,
@@ -130,13 +136,15 @@ public class AdminQueryService {
                     "from must be on or before to");
         }
 
+        String normalisedUserQuery = normaliseUserQuery(userQuery);
+
         int requestedPage = Math.max(page, 1);
         int offset = (requestedPage - 1) * PAGE_SIZE;
 
-        long totalCount = adminQueryRepository.countUsageRows(from, to, userId);
+        long totalCount = adminQueryRepository.countUsageRows(from, to, normalisedUserQuery);
         int totalPages = (totalCount == 0) ? 0 : (int) Math.ceil((double) totalCount / PAGE_SIZE);
 
-        List<UserReport> rows = adminQueryRepository.findUsageRows(from, to, userId, offset, PAGE_SIZE);
+        List<UserReport> rows = adminQueryRepository.findUsageRows(from, to, normalisedUserQuery, offset, PAGE_SIZE);
         List<AdminUsageRowView> items = new ArrayList<>(rows.size());
         for (UserReport report : rows) {
             User user = report.getUser();
@@ -265,6 +273,20 @@ public class AdminQueryService {
         return month.atDay(1).atStartOfDay(ZoneOffset.UTC)
                 .minusHours(FOREX_DAY_SHIFT_HOURS)
                 .toInstant();
+    }
+
+    /**
+     * Trims the search input and treats whitespace-only as absent. Returns
+     * {@code null} when the caller supplied no useful filter. The repository
+     * is responsible for escaping {@code LIKE} wildcards in the returned
+     * value; this method does not touch the characters themselves.
+     */
+    private static String normaliseUserQuery(String input) {
+        if (input == null) {
+            return null;
+        }
+        String trimmed = input.trim();
+        return trimmed.isEmpty() ? null : trimmed;
     }
 
     private static String planCodeFromId(short planId) {
